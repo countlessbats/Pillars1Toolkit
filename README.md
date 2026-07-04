@@ -18,7 +18,10 @@ tool, no CheatEngine, no separate launcher.
 - Works **in combat** (unlike the built-in Fast speed).
 - Two independent keys: **hold-to-accelerate** and **toggle-acceleration** (+ a Clear button).
 - In-game overlay to tailor the speed and keys; settings persist across sessions.
-- Respects pause: hitting Space or opening the inventory still freezes time.
+- Respects pause and inventory freezes.
+- **Space always unpauses** a paused game, even if Space is not bound to Pause. It does not pause
+  the game unless your normal keybinds do that.
+- Optional **skip intro movies** toggle, on by default.
 - Tiny footprint: one sidecar DLL called once per frame from `GameState.Update()`.
 
 ---
@@ -29,7 +32,7 @@ Requires Pillars of Eternity 1 (Windows).
 
 ### Option A — Quick install (no compiling) — recommended
 
-1. Download **`Pillars1Speedhack-v1.0.0.zip`** from the
+1. Download **`Pillars1Speedhack-v1.1.0.zip`** from the
    [Releases](https://github.com/countlessbats/Pillars1Speedhack/releases) page and extract it.
 2. **Close the game.**
 3. **Double-click `install.bat`** and approve the administrator prompt.
@@ -65,6 +68,7 @@ patcher.
   (default unbound) for momentary fast-forward. A `>> Time xN` badge shows when it's active.
 - Press **`F10`** to open the menu: drag the slider or use the `2×`/`3×`/`5×` presets, and click a
   keybind row to rebind it (`Esc` cancels a rebind). **Clear both accelerate keys** unbinds them.
+- Press **Space** while paused to unpause, regardless of whether Space is bound to Pause.
 - Settings save to `…\AppData\LocalLow\Obsidian Entertainment\Pillars of Eternity\LoomTimeAccelerator.cfg`.
 
 ---

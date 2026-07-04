@@ -14,6 +14,9 @@
     Optional path to the Roslyn C# compiler (csc.exe). If omitted, common Build Tools /
     Visual Studio locations are probed, then PATH.
 
+.PARAMETER OutputDir
+    Optional output folder. Defaults to the game's Managed folder.
+
 .EXAMPLE
     ./build.ps1 -GameDir "E:\SteamLibrary\steamapps\common\Pillars of Eternity"
 #>
@@ -21,6 +24,8 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$GameDir,
+
+    [string]$OutputDir,
 
     [string]$Csc
 )
@@ -49,7 +54,10 @@ if (-not $Csc -or -not (Test-Path $Csc)) {
 }
 
 $src    = Join-Path $PSScriptRoot 'src\Pillars1Speedhack.cs'
-$outDll = Join-Path $managed 'LoomTimeAccelerator.dll'
+if (-not $OutputDir) { $OutputDir = $managed }
+New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+
+$outDll = Join-Path $OutputDir 'LoomTimeAccelerator.dll'
 
 $refs = @(
     'Assembly-CSharp.dll',
@@ -58,16 +66,16 @@ $refs = @(
     'UnityEngine.IMGUIModule.dll',
     'UnityEngine.InputLegacyModule.dll',
     'UnityEngine.TextRenderingModule.dll'
-) | ForEach-Object { "/reference:`"$(Join-Path $managed $_)`"" }
+) | ForEach-Object { "/reference:$(Join-Path $managed $_)" }
 
 Write-Host "Compiler : $Csc"
 Write-Host "Source   : $src"
 Write-Host "Output   : $outDll"
 
-$argList = @('/nologo', '/target:library', "/out:`"$outDll`"") + $refs + @("`"$src`"")
+$argList = @('/nologo', '/target:library', "/out:$outDll") + $refs + @($src)
 & $Csc @argList
 if ($LASTEXITCODE -ne 0) { throw "Compilation failed ($LASTEXITCODE)." }
 
-Write-Host "`nBuilt and installed LoomTimeAccelerator.dll." -ForegroundColor Green
+Write-Host "`nBuilt LoomTimeAccelerator.dll." -ForegroundColor Green
 Write-Host "If this is a first install, run install.ps1 (or the patcher) to inject the hook." -ForegroundColor Yellow
 Write-Host "Restart the game to load the new build." -ForegroundColor Yellow
