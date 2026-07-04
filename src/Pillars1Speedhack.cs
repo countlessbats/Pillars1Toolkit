@@ -60,6 +60,9 @@ namespace LoomTimeAccelerator
         private bool m_enabled;   // effective this frame (toggle OR hold)
         private bool m_active;    // actually multiplying this frame
 
+        private bool m_skipIntros = true;   // auto-skip the startup logo movies
+        private bool m_introHandled;        // stop looking once handled / past the intro window
+
         private bool m_menuOpen;
         private Capturing m_capturing = Capturing.None;
         private bool m_inputDisabledByUs;
@@ -81,6 +84,9 @@ namespace LoomTimeAccelerator
 
         private void Update()
         {
+            TrySkipIntro();
+            TrySpaceUnpause();
+
             bool keyInput = SafeKeyInputAvailable();
 
             // While rebinding, OnGUI captures the next key; suppress hotkeys meanwhile.
@@ -101,6 +107,69 @@ namespace LoomTimeAccelerator
             }
 
             m_enabled = m_toggled || hold;
+        }
+
+        private void TrySpaceUnpause()
+        {
+            if (!Input.GetKeyDown(KeyCode.Space))
+            {
+                return;
+            }
+            if (m_capturing != Capturing.None)
+            {
+                return;
+            }
+            if (TimeController.Instance == null || GameState.IsLoading)
+            {
+                return;
+            }
+            if (TimeController.Instance.Paused)
+            {
+                TimeController.Instance.SafePaused = false;
+            }
+        }
+
+        // Auto-skip the startup logo movies by triggering the game's own skip on
+        // CompanyIntroductionManager (the same thing pressing a key does). Our hook comes alive
+        // during the intro because CompanyIntroductionManager.Start() creates the global prefab.
+        private void TrySkipIntro()
+        {
+            if (m_introHandled)
+            {
+                return;
+            }
+            if (!m_skipIntros || Time.realtimeSinceStartup > 30f)
+            {
+                // Past the intro window (or disabled): stop scanning for it.
+                if (Time.realtimeSinceStartup > 30f)
+                {
+                    m_introHandled = true;
+                }
+                return;
+            }
+
+            try
+            {
+                CompanyIntroductionManager intro = UnityEngine.Object.FindObjectOfType<CompanyIntroductionManager>();
+                if (intro == null)
+                {
+                    return;
+                }
+
+                intro.StopAllCoroutines();
+                System.Reflection.FieldInfo f = typeof(CompanyIntroductionManager).GetField(
+                    "m_skipped", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                if (f != null)
+                {
+                    f.SetValue(intro, true);
+                }
+                m_introHandled = true;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[LoomTimeAccelerator] skip intro failed: " + ex);
+                m_introHandled = true;
+            }
         }
 
         private void LateUpdate()
@@ -168,6 +237,9 @@ namespace LoomTimeAccelerator
             if (GUILayout.Button("3x")) { m_multiplier = 3f; }
             if (GUILayout.Button("5x")) { m_multiplier = 5f; }
             GUILayout.EndHorizontal();
+
+            GUILayout.Space(10f);
+            m_skipIntros = GUILayout.Toggle(m_skipIntros, " Skip intro movies at game start");
 
             GUILayout.Space(10f);
             DrawKeyRow("Hold to accelerate:", Capturing.Hold, m_holdKey);
@@ -318,6 +390,9 @@ namespace LoomTimeAccelerator
                         case "menuKey":
                             m_menuKey = ParseKey(val, m_menuKey);
                             break;
+                        case "skipIntros":
+                            m_skipIntros = val == "1" || val.ToLowerInvariant() == "true";
+                            break;
                     }
                 }
             }
@@ -342,6 +417,7 @@ namespace LoomTimeAccelerator
                 lines.Add("holdKey=" + m_holdKey);
                 lines.Add("toggleKey=" + m_toggleKey);
                 lines.Add("menuKey=" + m_menuKey);
+                lines.Add("skipIntros=" + (m_skipIntros ? "1" : "0"));
                 File.WriteAllLines(m_configPath, lines.ToArray());
             }
             catch (Exception ex)

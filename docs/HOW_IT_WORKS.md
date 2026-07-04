@@ -47,6 +47,9 @@ the main menu / during loads).
 - Two independent bindings — hold-to-accelerate and toggle-acceleration — are read with
   `UnityEngine.Input`, gated on the game's `UIWindowManager.KeyInputAvailable` so they don't fire
   while typing in a text field.
+- Space has one special one-way behavior: when `TimeController.Instance.Paused` is already true,
+  pressing Space sets `TimeController.Instance.SafePaused = false`. It never sets pause to true,
+  so Space only pauses if the player's normal game keybinds already make it pause.
 - The tailoring UI is a self-contained **IMGUI** (`OnGUI`) overlay, so it needs no surgery on the
   game's NGUI UI and no extra install. While the overlay is open the mod sets `GameInput.DisableInput`
   so clicks in the menu don't also move the party, and restores it on close.
