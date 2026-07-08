@@ -59,6 +59,7 @@ namespace LoomTimeAccelerator
         private const float ToolkitMinZoomFloor = 0.10f;
         private const int DefaultAttributePoints = 15;
         private const int DefaultStatMaximum = 18;
+        private const string EyelessFinaleConversation = "data/conversations/px2_04_eyeless_stronghold/px2_04_cv_abydon_finale.conversation";
 
         private float m_multiplier = 3f;
         private bool m_closeZoomEnabled = true;
@@ -511,6 +512,9 @@ namespace LoomTimeAccelerator
             DrawStatsControls();
 
             GUILayout.Space(10f);
+            DrawTestingControls();
+
+            GUILayout.Space(10f);
             bool unclip = GUILayout.Toggle(m_unclipCursor, " Let mouse leave the game window");
             if (unclip != m_unclipCursor)
             {
@@ -625,6 +629,83 @@ namespace LoomTimeAccelerator
             }
             GUILayout.Label("selected, or party if none selected");
             GUILayout.EndHorizontal();
+        }
+
+        private void DrawTestingControls()
+        {
+            GUILayout.Label("Testing");
+            if (GUILayout.Button("Start Eyeless finale conversation"))
+            {
+                StartEyelessFinaleConversation(0);
+            }
+
+            if (GUILayout.Button("Jump to Eyeless tempering branch"))
+            {
+                StartEyelessFinaleConversation(145);
+            }
+        }
+
+        private void StartEyelessFinaleConversation(int nodeId)
+        {
+            try
+            {
+                if (ConversationManager.Instance == null)
+                {
+                    AddToolkitMessage("conversation manager is not ready.", Color.yellow);
+                    return;
+                }
+
+                GameObject owner = GetConversationOwner();
+                if (owner == null)
+                {
+                    AddToolkitMessage("no player or party member is loaded.", Color.yellow);
+                    return;
+                }
+
+                ConversationManager.Instance.KillAllBarkStrings();
+                ConversationManager.Instance.StartConversation(EyelessFinaleConversation, nodeId, owner, FlowChartPlayer.DisplayMode.Standard);
+                AddToolkitMessage("started Eyeless finale conversation at node " + nodeId.ToString(CultureInfo.InvariantCulture) + ".", Color.cyan);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[LoomTimeAccelerator] Eyeless finale test failed: " + ex);
+                AddToolkitMessage("Eyeless finale test failed; see output_log.txt.", Color.yellow);
+            }
+        }
+
+        private static GameObject GetConversationOwner()
+        {
+            if (GameState.s_playerCharacter != null)
+            {
+                return GameState.s_playerCharacter.gameObject;
+            }
+
+            if (PartyMemberAI.PartyMembers == null)
+            {
+                return null;
+            }
+
+            for (int i = 0; i < PartyMemberAI.PartyMembers.Length; i++)
+            {
+                PartyMemberAI member = PartyMemberAI.PartyMembers[i];
+                if (member != null)
+                {
+                    return member.gameObject;
+                }
+            }
+
+            return null;
+        }
+
+        private static void AddToolkitMessage(string message, Color color)
+        {
+            try
+            {
+                Console.AddMessage("Pillars1Toolkit: " + message, color);
+            }
+            catch
+            {
+            }
         }
 
         private void ApplyCursorUnclip()
