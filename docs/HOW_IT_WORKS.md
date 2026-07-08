@@ -1,4 +1,4 @@
-# How Pillars1Speedhack works
+# How Pillars1Toolkit works
 
 This is the design write-up. It contains **no game code** — only a description of the game's
 observable behaviour and how the mod interoperates with it.
@@ -47,9 +47,27 @@ the main menu / during loads).
 - Two independent bindings — hold-to-accelerate and toggle-acceleration — are read with
   `UnityEngine.Input`, gated on the game's `UIWindowManager.KeyInputAvailable` so they don't fire
   while typing in a text field.
-- Space has one special one-way behavior: when `TimeController.Instance.Paused` is already true,
-  pressing Space sets `TimeController.Instance.SafePaused = false`. It never sets pause to true,
-  so Space only pauses if the player's normal game keybinds already make it pause.
+- Extra-close camera zoom lowers `GameState.Option.MinZoom` at runtime. The vanilla camera wheel still
+  calls `SyncCameraOrthoSettings.SetZoomLevelDelta()`; it simply clamps against the toolkit's lower floor
+  instead of the stock `0.75`. Disabling the option restores the remembered vanilla floor.
+- Space runs a small priority model each frame, evaluated **before** the game's own input readers.
+  The mod's MonoBehaviour carries `[DefaultExecutionOrder(-30000)]`, so its `Update()` runs first and,
+  when it decides to act, it *consumes* the physical Space key with the game's own per-frame handled-flag
+  (`GameInput.GetKeyDown(KeyCode.Space, setHandled: true)`, which auto-resets in `GameInput.LateUpdate`).
+  That prevents any other Space-bound control (PAUSE, the dead PASS_TURN binding, …) from also firing.
+  Priority, highest first:
+  1. **A conversation is open** → hands off. Space/Enter advancing a "Continue" is the game's own
+     `MappedControl.CONV_CONTINUE`; the mod only *adds* number keys, and does so in `LateUpdate` (after
+     the game has read the frame's input) so the advance can't leak the keypress onto the next node. The
+     advance itself is the game's own `UIConversationManager.OnButton(null)`, which self-guards to a no-op
+     on real choice nodes.
+  2. **Player-paused** (`TimeController.Paused && !UiPaused`, i.e. the RTwP pause, not a UI/menu freeze)
+     → consume Space and `SafePaused = false` (which only ever unpauses). Nothing else.
+  3. **Turn-based combat on a controllable party member's turn**
+     (`TacticalModeManager.IsInTacticalCombat()` + `WhoseTurn.IsControllablePartyMember()`) → consume
+     Space and `FinishTurn(WhoseTurn, PassTurnStyle.UI)`, mirroring the End-Turn button's `CanEndTurn`
+     interruptibility check (queued until the unit stops moving). Enemy/environment turns are skipped.
+  4. **Otherwise** → don't consume; the game's normal Space binding (default: pause) runs untouched.
 - The tailoring UI is a self-contained **IMGUI** (`OnGUI`) overlay, so it needs no surgery on the
   game's NGUI UI and no extra install. While the overlay is open the mod sets `GameInput.DisableInput`
   so clicks in the menu don't also move the party, and restores it on close.

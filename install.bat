@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableDelayedExpansion
 rem ============================================================================
-rem  Pillars1Speedhack installer (double-click me)
+rem  Pillars1Toolkit installer (double-click me)
 rem  Runs install.ps1 for you -- no PowerShell knowledge required.
 rem  Modifies the game's Assembly-CSharp.dll, so it asks for administrator
 rem  rights (game files are often under Program Files).
@@ -24,7 +24,7 @@ if %errorlevel% NEQ 0 (
 )
 
 echo.
-echo Installing Pillars1Speedhack...
+echo Installing Pillars1Toolkit...
 echo.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0install.ps1" %*
 set "PS_EXIT=%errorlevel%"
