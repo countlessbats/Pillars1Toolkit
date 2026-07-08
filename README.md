@@ -20,6 +20,9 @@ tool, no CheatEngine, no separate launcher.
 - In-game overlay to tailor the speed and keys; settings persist across sessions.
 - Respects pause and inventory freezes.
 - Optional **extra-close camera zoom** with a closest-zoom slider and quick presets.
+- Configurable character-creation **attribute points** and **attribute cap**.
+- Configurable **bonus to all skills** for the current primary party.
+- **Grant level** button for selected party members, or the whole primary party if nobody is selected.
 - **Smart Space key** — a priority model that makes Space do the most useful thing first:
   - **Unpause first, always.** If the game is paused (the real-time-with-pause combat pause), Space
     unpauses and does *nothing else* — regardless of what Space is otherwise bound to, and in any mode.
@@ -79,6 +82,12 @@ patcher.
   keybind row to rebind it (`Esc` cancels a rebind). **Clear both accelerate keys** unbinds them.
 - Enable **extra-close camera zoom** and set the closest zoom value. Lower values zoom closer; `Close`
   defaults to `0.20`, and `Extreme` goes to `0.10`.
+- Set character-creation attribute points and maximum attribute value. Defaults are vanilla-style
+  `15` points and an `18` cap.
+- Set **Bonus to all skills** to any integer value. `0` is vanilla; positive or negative values are
+  applied live to Stealth, Athletics, Lore, Mechanics, Survival, and Crafting.
+- Click **Grant level** to add enough XP for one more pending level-up on selected party members; if
+  none are selected, it applies to the whole primary party.
 - Press **Space** while paused to unpause (and nothing else), regardless of whether Space is bound to
   Pause. In turn-based combat, Space ends your character's turn when unpaused. At a dialogue "Continue",
   Space / Enter / any number key advances it.

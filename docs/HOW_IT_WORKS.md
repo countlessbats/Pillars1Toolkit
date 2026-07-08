@@ -50,6 +50,16 @@ the main menu / during loads).
 - Extra-close camera zoom lowers `GameState.Option.MinZoom` at runtime. The vanilla camera wheel still
   calls `SyncCameraOrthoSettings.SetZoomLevelDelta()`; it simply clamps against the toolkit's lower floor
   instead of the stock `0.75`. Disabling the option restores the remembered vanilla floor.
+- Character creation settings mirror the Nice Stats chargen approach: while
+  `UICharacterCreationManager` is creating a new player or new companion, the toolkit writes
+  `TotalPointBuy` and `StatHardMaximum`; when the manager changes or exits that mode, it restores the
+  original values it observed.
+- The skill bonus is a reversible flat adjustment via `CharacterStats.AdjustSkillBonus()` for every
+  primary party member and every skill. Each character records the amount applied so changing the setting
+  live only applies the delta, and leaving/removing a party member removes the old delta.
+- `Grant level` targets selected party members, falling back to the primary party. It adds enough XP for
+  one additional level-up opportunity, capped at the game's current `CharacterStats.PlayerLevelCap`, and
+  leaves the actual level-up choices to the vanilla UI.
 - Space runs a small priority model each frame, evaluated **before** the game's own input readers.
   The mod's MonoBehaviour carries `[DefaultExecutionOrder(-30000)]`, so its `Update()` runs first and,
   when it decides to act, it *consumes* the physical Space key with the game's own per-frame handled-flag
