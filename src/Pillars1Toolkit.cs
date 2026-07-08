@@ -57,11 +57,19 @@ namespace LoomTimeAccelerator
         private const float MaxMult = 10f;
         private const float VanillaMinZoom = 0.75f;
         private const float ToolkitMinZoomFloor = 0.10f;
+        private const int DefaultAttributePoints = 15;
+        private const int DefaultStatMaximum = 18;
 
         private float m_multiplier = 3f;
         private bool m_closeZoomEnabled = true;
         private float m_minZoom = 0.20f;
         private float m_seenVanillaMinZoom = VanillaMinZoom;
+        private int m_chargenPoints = DefaultAttributePoints;
+        private int m_chargenStatMaximum = DefaultStatMaximum;
+        private int m_skillBonus;
+        private string m_chargenPointsText = DefaultAttributePoints.ToString(CultureInfo.InvariantCulture);
+        private string m_chargenStatMaximumText = DefaultStatMaximum.ToString(CultureInfo.InvariantCulture);
+        private string m_skillBonusText = "0";
 
         // Separate bindings: hold-to-accelerate and toggle-acceleration.
         private KeyCode m_holdKey = KeyCode.None;
@@ -80,6 +88,11 @@ namespace LoomTimeAccelerator
         private bool m_inputDisabledByUs;
         private Rect m_window = new Rect(60f, 60f, 340f, 0f);
         private string m_configPath;
+        private UICharacterCreationManager m_seenCreationManager;
+        private int m_originalPointBuy;
+        private int m_originalStatHardMaximum;
+        private bool m_hasOriginalCharacterCreationValues;
+        private readonly Dictionary<CharacterStats, int[]> m_appliedSkillBonuses = new Dictionary<CharacterStats, int[]>();
 
         // --- Space-behavior expansion (unpause-first / end-turn / dialogue) ---
         private AIController m_pendingEndTurn;            // queued end-turn awaiting an interruptible moment
@@ -103,6 +116,8 @@ namespace LoomTimeAccelerator
         {
             TrySkipIntro();
             ApplyZoomOverride();
+            HandleCharacterCreation();
+            ApplySkillBonusToParty();
             HandleSpacePriorities();
             PumpPendingEndTurn();
 
@@ -491,6 +506,9 @@ namespace LoomTimeAccelerator
             DrawZoomControls();
 
             GUILayout.Space(10f);
+            DrawStatsControls();
+
+            GUILayout.Space(10f);
             m_skipIntros = GUILayout.Toggle(m_skipIntros, " Skip intro movies at game start");
 
             GUILayout.Space(10f);
@@ -576,6 +594,323 @@ namespace LoomTimeAccelerator
             catch (Exception ex)
             {
                 Debug.LogError("[LoomTimeAccelerator] zoom override failed: " + ex);
+            }
+        }
+
+        private void DrawStatsControls()
+        {
+            GUILayout.Label("Character creation");
+            DrawIntSetting("Attribute points:", ref m_chargenPoints, ref m_chargenPointsText, -9999, 9999);
+            DrawIntSetting("Attribute maximum:", ref m_chargenStatMaximum, ref m_chargenStatMaximumText, 1, 9999);
+
+            GUILayout.Space(6f);
+            GUILayout.Label("Party");
+            DrawIntSetting("Bonus to all skills:", ref m_skillBonus, ref m_skillBonusText, -9999, 9999);
+
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("Grant level"))
+            {
+                GrantLevel();
+            }
+            GUILayout.Label("selected, or party if none selected");
+            GUILayout.EndHorizontal();
+        }
+
+        private void DrawIntSetting(string label, ref int value, ref string text, int min, int max)
+        {
+            GUILayout.BeginHorizontal();
+            GUILayout.Label(label, GUILayout.Width(160f));
+            string next = GUILayout.TextField(text, GUILayout.Width(70f));
+            if (next != text)
+            {
+                text = next;
+                int parsed;
+                if (int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out parsed))
+                {
+                    value = Mathf.Clamp(parsed, min, max);
+                    if (value.ToString(CultureInfo.InvariantCulture) != text)
+                    {
+                        text = value.ToString(CultureInfo.InvariantCulture);
+                    }
+                    SaveConfig();
+                }
+            }
+            if (GUILayout.Button("-", GUILayout.Width(28f)))
+            {
+                value = Mathf.Clamp(value - 1, min, max);
+                text = value.ToString(CultureInfo.InvariantCulture);
+                SaveConfig();
+            }
+            if (GUILayout.Button("+", GUILayout.Width(28f)))
+            {
+                value = Mathf.Clamp(value + 1, min, max);
+                text = value.ToString(CultureInfo.InvariantCulture);
+                SaveConfig();
+            }
+            GUILayout.EndHorizontal();
+        }
+
+        private void HandleCharacterCreation()
+        {
+            try
+            {
+                UICharacterCreationManager manager = UICharacterCreationManager.Instance;
+                if (manager == null)
+                {
+                    RestoreCharacterCreationValues();
+                    return;
+                }
+
+                if (manager != m_seenCreationManager)
+                {
+                    RestoreCharacterCreationValues();
+                    m_seenCreationManager = manager;
+                    m_originalPointBuy = manager.TotalPointBuy;
+                    m_originalStatHardMaximum = manager.StatHardMaximum;
+                    m_hasOriginalCharacterCreationValues = true;
+                }
+
+                if (manager.CreationType == UICharacterCreationManager.CharacterCreationType.NewPlayer
+                    || manager.CreationType == UICharacterCreationManager.CharacterCreationType.NewCompanion)
+                {
+                    manager.TotalPointBuy = m_chargenPoints;
+                    manager.StatHardMaximum = m_chargenStatMaximum;
+                }
+                else
+                {
+                    RestoreCharacterCreationValues();
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[LoomTimeAccelerator] chargen settings failed: " + ex);
+            }
+        }
+
+        private void RestoreCharacterCreationValues()
+        {
+            if (m_seenCreationManager != null && m_hasOriginalCharacterCreationValues)
+            {
+                m_seenCreationManager.TotalPointBuy = m_originalPointBuy;
+                m_seenCreationManager.StatHardMaximum = m_originalStatHardMaximum;
+            }
+            m_seenCreationManager = null;
+            m_originalPointBuy = 0;
+            m_originalStatHardMaximum = 0;
+            m_hasOriginalCharacterCreationValues = false;
+        }
+
+        private void ApplySkillBonusToParty()
+        {
+            if (GameState.IsLoading || PartyMemberAI.PartyMembers == null)
+            {
+                return;
+            }
+
+            HashSet<CharacterStats> seen = new HashSet<CharacterStats>();
+            PartyMemberAI[] members = PartyMemberAI.PartyMembers;
+            for (int i = 0; i < members.Length; i++)
+            {
+                PartyMemberAI member = members[i];
+                if (member == null || member.Secondary || member.Summoner != null)
+                {
+                    continue;
+                }
+
+                CharacterStats stats = member.GetComponent<CharacterStats>();
+                if (stats == null)
+                {
+                    continue;
+                }
+
+                seen.Add(stats);
+                ApplySkillBonus(stats);
+            }
+
+            CleanupMissingSkillBonuses(seen);
+        }
+
+        private void ApplySkillBonus(CharacterStats stats)
+        {
+            int[] applied = GetAppliedSkillArray(stats);
+            CharacterStats.SkillType[] skills = Skills;
+            for (int i = 0; i < skills.Length; i++)
+            {
+                int delta = m_skillBonus - applied[i];
+                if (delta != 0)
+                {
+                    stats.AdjustSkillBonus(skills[i], delta);
+                    applied[i] = m_skillBonus;
+                }
+            }
+        }
+
+        private void RemoveSkillBonus(CharacterStats stats)
+        {
+            int[] applied;
+            if (!m_appliedSkillBonuses.TryGetValue(stats, out applied))
+            {
+                return;
+            }
+
+            CharacterStats.SkillType[] skills = Skills;
+            for (int i = 0; i < skills.Length; i++)
+            {
+                if (applied[i] != 0)
+                {
+                    stats.AdjustSkillBonus(skills[i], -applied[i]);
+                    applied[i] = 0;
+                }
+            }
+        }
+
+        private void CleanupMissingSkillBonuses(HashSet<CharacterStats> seen)
+        {
+            List<CharacterStats> remove = null;
+            foreach (CharacterStats stats in m_appliedSkillBonuses.Keys)
+            {
+                if (stats == null || !seen.Contains(stats))
+                {
+                    if (stats != null)
+                    {
+                        RemoveSkillBonus(stats);
+                    }
+                    if (remove == null)
+                    {
+                        remove = new List<CharacterStats>();
+                    }
+                    remove.Add(stats);
+                }
+            }
+
+            if (remove == null)
+            {
+                return;
+            }
+            for (int i = 0; i < remove.Count; i++)
+            {
+                m_appliedSkillBonuses.Remove(remove[i]);
+            }
+        }
+
+        private int[] GetAppliedSkillArray(CharacterStats stats)
+        {
+            int[] applied;
+            if (!m_appliedSkillBonuses.TryGetValue(stats, out applied))
+            {
+                applied = new int[Skills.Length];
+                m_appliedSkillBonuses[stats] = applied;
+            }
+            return applied;
+        }
+
+        private void GrantLevel()
+        {
+            try
+            {
+                List<CharacterStats> targets = GetLevelGrantTargets();
+                int granted = 0;
+                for (int i = 0; i < targets.Count; i++)
+                {
+                    CharacterStats stats = targets[i];
+                    if (stats == null || stats.Level >= CharacterStats.PlayerLevelCap)
+                    {
+                        continue;
+                    }
+
+                    int currentMax = stats.GetMaxLevelCanLevelUpTo();
+                    int targetLevel = Mathf.Clamp(Mathf.Max(stats.Level, currentMax) + 1, 1, CharacterStats.PlayerLevelCap);
+                    int needed = CharacterStats.ExperienceNeededForLevel(targetLevel) - stats.Experience;
+                    if (needed > 0)
+                    {
+                        stats.AddExperience(needed);
+                        granted++;
+                    }
+                }
+
+                try
+                {
+                    Console.AddMessage("Pillars1Toolkit: granted a level to " + granted.ToString(CultureInfo.InvariantCulture)
+                        + " character" + (granted == 1 ? "." : "s."), Color.cyan);
+                }
+                catch
+                {
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[LoomTimeAccelerator] grant level failed: " + ex);
+            }
+        }
+
+        private static List<CharacterStats> GetLevelGrantTargets()
+        {
+            List<CharacterStats> targets = new List<CharacterStats>();
+            try
+            {
+                List<GameObject> selected = PartyMemberAI.GetSelectedPartyMembers();
+                if (selected != null)
+                {
+                    for (int i = 0; i < selected.Count; i++)
+                    {
+                        AddStatsTarget(targets, selected[i]);
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            if (targets.Count > 0)
+            {
+                return targets;
+            }
+
+            PartyMemberAI[] members = PartyMemberAI.PartyMembers;
+            if (members != null)
+            {
+                for (int i = 0; i < members.Length; i++)
+                {
+                    PartyMemberAI member = members[i];
+                    if (member == null || member.Secondary || member.Summoner != null)
+                    {
+                        continue;
+                    }
+                    AddStatsTarget(targets, member.gameObject);
+                }
+            }
+
+            return targets;
+        }
+
+        private static void AddStatsTarget(List<CharacterStats> targets, GameObject obj)
+        {
+            if (obj == null)
+            {
+                return;
+            }
+
+            CharacterStats stats = obj.GetComponent<CharacterStats>();
+            if (stats == null || targets.Contains(stats))
+            {
+                return;
+            }
+            targets.Add(stats);
+        }
+
+        private static CharacterStats.SkillType[] Skills
+        {
+            get
+            {
+                return new CharacterStats.SkillType[]
+                {
+                    CharacterStats.SkillType.Stealth,
+                    CharacterStats.SkillType.Athletics,
+                    CharacterStats.SkillType.Lore,
+                    CharacterStats.SkillType.Mechanics,
+                    CharacterStats.SkillType.Survival,
+                    CharacterStats.SkillType.Crafting
+                };
             }
         }
 
@@ -718,6 +1053,18 @@ namespace LoomTimeAccelerator
                                 m_minZoom = Mathf.Clamp(z, ToolkitMinZoomFloor, VanillaMinZoom);
                             }
                             break;
+                        case "chargenPoints":
+                            m_chargenPoints = ParseIntSetting(val, m_chargenPoints, -9999, 9999);
+                            m_chargenPointsText = m_chargenPoints.ToString(CultureInfo.InvariantCulture);
+                            break;
+                        case "chargenStatMaximum":
+                            m_chargenStatMaximum = ParseIntSetting(val, m_chargenStatMaximum, 1, 9999);
+                            m_chargenStatMaximumText = m_chargenStatMaximum.ToString(CultureInfo.InvariantCulture);
+                            break;
+                        case "skillBonus":
+                            m_skillBonus = ParseIntSetting(val, m_skillBonus, -9999, 9999);
+                            m_skillBonusText = m_skillBonus.ToString(CultureInfo.InvariantCulture);
+                            break;
                     }
                 }
             }
@@ -745,6 +1092,9 @@ namespace LoomTimeAccelerator
                 lines.Add("skipIntros=" + (m_skipIntros ? "1" : "0"));
                 lines.Add("closeZoomEnabled=" + (m_closeZoomEnabled ? "1" : "0"));
                 lines.Add("minZoom=" + m_minZoom.ToString("0.00", CultureInfo.InvariantCulture));
+                lines.Add("chargenPoints=" + m_chargenPoints.ToString(CultureInfo.InvariantCulture));
+                lines.Add("chargenStatMaximum=" + m_chargenStatMaximum.ToString(CultureInfo.InvariantCulture));
+                lines.Add("skillBonus=" + m_skillBonus.ToString(CultureInfo.InvariantCulture));
                 File.WriteAllLines(m_configPath, lines.ToArray());
             }
             catch (Exception ex)
@@ -763,6 +1113,16 @@ namespace LoomTimeAccelerator
             {
                 return fallback;
             }
+        }
+
+        private static int ParseIntSetting(string s, int fallback, int min, int max)
+        {
+            int parsed;
+            if (int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out parsed))
+            {
+                return Mathf.Clamp(parsed, min, max);
+            }
+            return fallback;
         }
     }
 }
