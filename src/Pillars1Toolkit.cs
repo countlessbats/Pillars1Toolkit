@@ -70,6 +70,7 @@ namespace LoomTimeAccelerator
         private string m_chargenPointsText = DefaultAttributePoints.ToString(CultureInfo.InvariantCulture);
         private string m_chargenStatMaximumText = DefaultStatMaximum.ToString(CultureInfo.InvariantCulture);
         private string m_skillBonusText = "0";
+        private bool m_unclipCursor = true;
 
         // Separate bindings: hold-to-accelerate and toggle-acceleration.
         private KeyCode m_holdKey = KeyCode.None;
@@ -118,6 +119,7 @@ namespace LoomTimeAccelerator
             ApplyZoomOverride();
             HandleCharacterCreation();
             ApplySkillBonusToParty();
+            ApplyCursorUnclip();
             HandleSpacePriorities();
             PumpPendingEndTurn();
 
@@ -509,6 +511,15 @@ namespace LoomTimeAccelerator
             DrawStatsControls();
 
             GUILayout.Space(10f);
+            bool unclip = GUILayout.Toggle(m_unclipCursor, " Let mouse leave the game window");
+            if (unclip != m_unclipCursor)
+            {
+                m_unclipCursor = unclip;
+                ApplyCursorUnclip();
+                SaveConfig();
+            }
+
+            GUILayout.Space(10f);
             m_skipIntros = GUILayout.Toggle(m_skipIntros, " Skip intro movies at game start");
 
             GUILayout.Space(10f);
@@ -614,6 +625,23 @@ namespace LoomTimeAccelerator
             }
             GUILayout.Label("selected, or party if none selected");
             GUILayout.EndHorizontal();
+        }
+
+        private void ApplyCursorUnclip()
+        {
+            if (!m_unclipCursor)
+            {
+                return;
+            }
+
+            try
+            {
+                WinCursor.Clip(false);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[LoomTimeAccelerator] cursor unclip failed: " + ex);
+            }
         }
 
         private void DrawIntSetting(string label, ref int value, ref string text, int min, int max)
@@ -1065,6 +1093,9 @@ namespace LoomTimeAccelerator
                             m_skillBonus = ParseIntSetting(val, m_skillBonus, -9999, 9999);
                             m_skillBonusText = m_skillBonus.ToString(CultureInfo.InvariantCulture);
                             break;
+                        case "unclipCursor":
+                            m_unclipCursor = val == "1" || val.ToLowerInvariant() == "true";
+                            break;
                     }
                 }
             }
@@ -1095,6 +1126,7 @@ namespace LoomTimeAccelerator
                 lines.Add("chargenPoints=" + m_chargenPoints.ToString(CultureInfo.InvariantCulture));
                 lines.Add("chargenStatMaximum=" + m_chargenStatMaximum.ToString(CultureInfo.InvariantCulture));
                 lines.Add("skillBonus=" + m_skillBonus.ToString(CultureInfo.InvariantCulture));
+                lines.Add("unclipCursor=" + (m_unclipCursor ? "1" : "0"));
                 File.WriteAllLines(m_configPath, lines.ToArray());
             }
             catch (Exception ex)

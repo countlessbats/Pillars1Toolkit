@@ -20,6 +20,7 @@ tool, no CheatEngine, no separate launcher.
 - In-game overlay to tailor the speed and keys; settings persist across sessions.
 - Respects pause and inventory freezes.
 - Optional **extra-close camera zoom** with a closest-zoom slider and quick presets.
+- Optional **mouse untrap** so the cursor can leave the game window in windowed mode.
 - Configurable character-creation **attribute points** and **attribute cap**.
 - Configurable **bonus to all skills** for the current primary party.
 - **Grant level** button for selected party members, or the whole primary party if nobody is selected.
@@ -82,6 +83,8 @@ patcher.
   keybind row to rebind it (`Esc` cancels a rebind). **Clear both accelerate keys** unbinds them.
 - Enable **extra-close camera zoom** and set the closest zoom value. Lower values zoom closer; `Close`
   defaults to `0.20`, and `Extreme` goes to `0.10`.
+- Leave **Let mouse leave the game window** enabled if you want to move to another monitor/window
+  without Alt-Tab. Disable it to restore the game's normal cursor clipping behavior.
 - Set character-creation attribute points and maximum attribute value. Defaults are vanilla-style
   `15` points and an `18` cap.
 - Set **Bonus to all skills** to any integer value. `0` is vanilla; positive or negative values are
