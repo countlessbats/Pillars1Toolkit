@@ -50,6 +50,8 @@ the main menu / during loads).
 - Extra-close camera zoom lowers `GameState.Option.MinZoom` at runtime. The vanilla camera wheel still
   calls `SyncCameraOrthoSettings.SetZoomLevelDelta()`; it simply clamps against the toolkit's lower floor
   instead of the stock `0.75`. Disabling the option restores the remembered vanilla floor.
+- Mouse untrap reuses the game's own `WinCursor.Clip(false)` helper each frame while enabled, which
+  clears the OS cursor clipping rectangle after the game tries to confine it to the window.
 - Character creation settings mirror the Nice Stats chargen approach: while
   `UICharacterCreationManager` is creating a new player or new companion, the toolkit writes
   `TotalPointBuy` and `StatHardMaximum`; when the manager changes or exits that mode, it restores the
