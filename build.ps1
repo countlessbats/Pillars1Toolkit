@@ -1,9 +1,9 @@
 <#
 .SYNOPSIS
-    Builds the Pillars1Speedhack sidecar assembly and installs it into the game's Managed folder.
+    Builds the Pillars1Toolkit sidecar assembly and installs it into the game's Managed folder.
 
 .DESCRIPTION
-    Compiles src/Pillars1Speedhack.cs into LoomTimeAccelerator.dll and copies it to
+    Compiles src/Pillars1Toolkit.cs into LoomTimeAccelerator.dll and copies it to
     <GameDir>/PillarsOfEternity_Data/Managed/. The internal DLL name is intentionally
     LoomTimeAccelerator.dll to match the injected hook (see README).
 
@@ -53,7 +53,7 @@ if (-not $Csc -or -not (Test-Path $Csc)) {
     throw "Could not locate csc.exe. Pass it explicitly with -Csc."
 }
 
-$src    = Join-Path $PSScriptRoot 'src\Pillars1Speedhack.cs'
+$src    = Join-Path $PSScriptRoot 'src\Pillars1Toolkit.cs'
 if (-not $OutputDir) { $OutputDir = $managed }
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 

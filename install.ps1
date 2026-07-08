@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Installs Pillars1Speedhack into Pillars of Eternity 1 with NO compilation required.
+    Installs Pillars1Toolkit into Pillars of Eternity 1 with NO compilation required.
 
 .DESCRIPTION
     This script:
@@ -171,5 +171,5 @@ finally {
     if ($module) { $module.Dispose() }
 }
 
-Write-Host "`nPillars1Speedhack installed. Launch the game and press F10 in-game to open the menu." -ForegroundColor Cyan
+Write-Host "`nPillars1Toolkit installed. Launch the game and press F10 in-game to open the menu." -ForegroundColor Cyan
 Write-Host "To uninstall: restore '$backup' over Assembly-CSharp.dll and delete $SidecarName." -ForegroundColor DarkGray
