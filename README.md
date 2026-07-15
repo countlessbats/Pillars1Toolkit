@@ -15,6 +15,8 @@ tool, no CheatEngine, no separate launcher.
 ## Features
 
 - Accelerate everything by a configurable **1.25×–10×** multiplier.
+- Set the game's native **Fast mode** anywhere from its vanilla **1.8×** to **10×**.
+- Optional **Fast Scouting** keeps full running speed while scouting.
 - Works **in combat** (unlike the built-in Fast speed).
 - Two independent keys: **hold-to-accelerate** and **toggle-acceleration** (+ a Clear button).
 - In-game overlay to tailor the speed and keys; settings persist across sessions.

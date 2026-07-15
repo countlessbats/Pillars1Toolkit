@@ -248,26 +248,27 @@ namespace LoomTimeAccelerator
             {
                 group.NumberLabel.gameObject.SetActive(false);
             }
-            m_sliderValueLabel = UnityEngine.Object.Instantiate(m_checkboxPrototype.Label);
-            m_sliderValueLabel.name = name + "Value";
-            m_sliderValueLabel.transform.parent = m_page.transform;
-            m_sliderValueLabel.transform.localScale = Vector3.one;
-            m_sliderValueLabel.pivot = UIWidget.Pivot.Left;
-            SetLabel(m_sliderValueLabel, "x" + initial.ToString("0.##"));
+            UILabel valueLabel = UnityEngine.Object.Instantiate(m_checkboxPrototype.Label);
+            m_sliderValueLabel = valueLabel;
+            valueLabel.name = name + "Value";
+            valueLabel.transform.parent = m_page.transform;
+            valueLabel.transform.localScale = Vector3.one;
+            valueLabel.pivot = UIWidget.Pivot.Left;
+            SetLabel(valueLabel, "x" + initial.ToString("0.##"));
             if (group.Slider.Track != null)
             {
                 Vector3 worldRight = group.Slider.Track.transform.TransformPoint(new Vector3(0.5f, 0f, 0f));
                 Vector3 rightInPage = m_page.transform.InverseTransformPoint(worldRight);
-                m_sliderValueLabel.transform.localPosition = new Vector3(
+                valueLabel.transform.localPosition = new Vector3(
                     rightInPage.x + 24f, rightInPage.y, rightInPage.z);
             }
             group.Setting = initial;
             UIOptionsSlider.OnSettingChanged applySliderSetting = delegate(UIOptionsSlider sender, int setting)
             {
                 float rounded = minimum + setting * step;
-                if (m_sliderValueLabel != null)
+                if (valueLabel != null)
                 {
-                    SetLabel(m_sliderValueLabel, "x" + rounded.ToString("0.##"));
+                    SetLabel(valueLabel, "x" + rounded.ToString("0.##"));
                 }
                 changed(rounded);
             };
@@ -431,6 +432,9 @@ namespace LoomTimeAccelerator
         private static UILabel s_holdKeyLabel;
         private static UILabel s_toggleKeyLabel;
         private static UIOptionsSliderGroup s_multiplierSlider;
+        private static UILabel s_multiplierValueLabel;
+        private static UIOptionsSliderGroup s_fastModeSlider;
+        private static UILabel s_fastModeValueLabel;
         private static UIMessageBox s_keybindPrompt;
         private static int s_captureArmedFrame;
         // Grace deadline after the prompt closes: the UIMessageBox confirms on Space/Return
@@ -461,6 +465,9 @@ namespace LoomTimeAccelerator
                     s_holdKeyLabel = null;
                     s_toggleKeyLabel = null;
                     s_multiplierSlider = null;
+                    s_multiplierValueLabel = null;
+                    s_fastModeSlider = null;
+                    s_fastModeValueLabel = null;
                 }
 
                 if (options != null && s_nativeMenu == null && !s_nativeMenuFailed &&
@@ -481,7 +488,7 @@ namespace LoomTimeAccelerator
                 }
 
                 RefreshKeybindLabels(owner);
-                RefreshMultiplier(owner);
+                RefreshSliders(owner);
             }
 
             public static bool HandleCaptureInput(Accelerator owner)
@@ -603,6 +610,19 @@ namespace LoomTimeAccelerator
                                 owner.SaveConfig();
                             }
                         });
+                    s_multiplierValueLabel = page.SliderValueLabel;
+                    s_fastModeSlider = page.AddSlider("ToolkitFastMode", "Built-in Fast mode speed",
+                        1f, 10f, 0.1f, owner.m_fastModeScale, delegate(float value)
+                        {
+                            if (s_syncingSlider) { return; }
+                            float rounded = Mathf.Round(value * 10f) / 10f;
+                            if (Mathf.Abs(rounded - owner.m_fastModeScale) > 0.001f)
+                            {
+                                owner.m_fastModeScale = rounded;
+                                owner.SaveConfig();
+                            }
+                        });
+                    s_fastModeValueLabel = page.SliderValueLabel;
                     s_holdKeyButton = page.AddKeybind("ToolkitHoldKey", "Hold to accelerate",
                         FormatKey(owner.m_holdKey), delegate(GameObject sender)
                         {
@@ -626,6 +646,12 @@ namespace LoomTimeAccelerator
                         {
                             owner.m_throttleFootsteps = value;
                             s_throttleFootsteps = value;
+                            owner.SaveConfig();
+                        });
+                    page.AddCheckbox("ToolkitFastScouting", "Fast Scouting",
+                        owner.m_fastScouting, delegate(bool value)
+                        {
+                            owner.m_fastScouting = value;
                             owner.SaveConfig();
                         });
                     page.AddCheckbox("ToolkitInvulnerable", "Invulnerability (party never takes damage)",
@@ -696,22 +722,31 @@ namespace LoomTimeAccelerator
                 }
             }
 
-            private static void RefreshMultiplier(Accelerator owner)
+            private static void RefreshSliders(Accelerator owner)
             {
-                if (s_multiplierSlider == null || s_multiplierSlider.Slider == null)
-                {
-                    return;
-                }
-                if (Mathf.Abs(s_multiplierSlider.Setting - owner.m_multiplier) > 0.001f)
+                if (s_multiplierSlider != null && s_multiplierSlider.Slider != null
+                    && Mathf.Abs(s_multiplierSlider.Setting - owner.m_multiplier) > 0.001f)
                 {
                     s_syncingSlider = true;
                     try { s_multiplierSlider.Setting = owner.m_multiplier; }
                     finally { s_syncingSlider = false; }
                 }
-                if (s_nativeMenu != null && s_nativeMenu.SliderValueLabel != null)
+                if (s_multiplierValueLabel != null)
                 {
-                    SetLabelText(s_nativeMenu.SliderValueLabel,
+                    SetLabelText(s_multiplierValueLabel,
                         "x" + owner.m_multiplier.ToString("0.##"));
+                }
+                if (s_fastModeSlider != null && s_fastModeSlider.Slider != null
+                    && Mathf.Abs(s_fastModeSlider.Setting - owner.m_fastModeScale) > 0.001f)
+                {
+                    s_syncingSlider = true;
+                    try { s_fastModeSlider.Setting = owner.m_fastModeScale; }
+                    finally { s_syncingSlider = false; }
+                }
+                if (s_fastModeValueLabel != null)
+                {
+                    SetLabelText(s_fastModeValueLabel,
+                        "x" + owner.m_fastModeScale.ToString("0.##"));
                 }
             }
 

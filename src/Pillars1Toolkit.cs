@@ -12,6 +12,9 @@ using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
 
+[assembly: AssemblyVersion("1.2.1.0")]
+[assembly: AssemblyFileVersion("1.2.1.0")]
+
 namespace LoomTimeAccelerator
 {
     // Sidecar entry point. Assembly-CSharp is patched to call Bootstrap.Tick() at the top of
@@ -60,8 +63,12 @@ namespace LoomTimeAccelerator
         private const float ToolkitMinZoomFloor = 0.10f;
         private const int DefaultAttributePoints = 15;
         private const int DefaultStatMaximum = 18;
+        private const float DefaultFastModeScale = 1.8f;
 
         private float m_multiplier = 3f;
+        private float m_fastModeScale = DefaultFastModeScale;
+        private bool m_fastScouting;
+        private bool m_fastScoutingWasEnabled;
         private bool m_closeZoomEnabled = true;
         private float m_minZoom = 0.20f;
         private float m_seenVanillaMinZoom = VanillaMinZoom;
@@ -469,6 +476,8 @@ namespace LoomTimeAccelerator
             ApplySkillBonusToParty();
             ApplyCursorUnclip();
             ApplyTutorialSetting();
+            ApplyBuiltInFastModeScale();
+            ApplyFastScouting();
             HandleSpacePriorities();
             PumpPendingEndTurn();
 
@@ -500,6 +509,47 @@ namespace LoomTimeAccelerator
             }
 
             m_enabled = m_toggled || hold;
+        }
+
+        private void ApplyBuiltInFastModeScale()
+        {
+            TimeController controller = TimeController.Instance;
+            if (controller == null || Mathf.Abs(controller.FastTime - m_fastModeScale) < 0.001f)
+            {
+                return;
+            }
+            bool wasFast = controller.Fast;
+            controller.FastTime = m_fastModeScale;
+            if (wasFast)
+            {
+                controller.Fast = true;
+            }
+        }
+
+        private void ApplyFastScouting()
+        {
+            // The host/solo simulation owns movement. A coop client receives the resulting
+            // positions from the host and must not invent a different local mover speed.
+            bool apply = m_fastScouting && !CoopClientActive();
+            PartyMemberAI[] party = PartyMemberAI.PartyMembers;
+            for (int i = 0; party != null && i < party.Length; i++)
+            {
+                PartyMemberAI member = party[i];
+                if (member == null || member.gameObject == null
+                    || !Stealth.IsInStealthMode(member.gameObject)) { continue; }
+                Mover mover = member.GetComponent<Mover>();
+                if (mover == null) { continue; }
+                if (apply)
+                {
+                    float run = mover.GetRunSpeed();
+                    if (Mathf.Abs(mover.DesiredSpeed - run) > 0.001f) { mover.UseRunSpeed(); }
+                }
+                else if (m_fastScoutingWasEnabled)
+                {
+                    mover.UseWalkSpeed();
+                }
+            }
+            m_fastScoutingWasEnabled = apply;
         }
 
         // Space priority model (highest first):
@@ -1151,6 +1201,21 @@ namespace LoomTimeAccelerator
             if (GUILayout.Button("3x")) { m_multiplier = 3f; }
             if (GUILayout.Button("5x")) { m_multiplier = 5f; }
             GUILayout.EndHorizontal();
+
+            GUILayout.Label("Built-in Fast mode:  x" + m_fastModeScale.ToString("0.0#", CultureInfo.InvariantCulture));
+            float fastSlider = GUILayout.HorizontalSlider(m_fastModeScale, 1f, 10f);
+            if (Mathf.Abs(fastSlider - m_fastModeScale) > 0.001f)
+            {
+                m_fastModeScale = Mathf.Round(fastSlider * 10f) / 10f;
+                SaveConfig();
+            }
+
+            bool fastScouting = GUILayout.Toggle(m_fastScouting, " Fast Scouting");
+            if (fastScouting != m_fastScouting)
+            {
+                m_fastScouting = fastScouting;
+                SaveConfig();
+            }
 
             bool throttleSteps = GUILayout.Toggle(m_throttleFootsteps, " Limit footstep sounds to 1.5x normal rate");
             if (throttleSteps != m_throttleFootsteps)
@@ -2012,6 +2077,16 @@ namespace LoomTimeAccelerator
                                 m_multiplier = Mathf.Clamp(m, MinMult, MaxMult);
                             }
                             break;
+                        case "fastModeScale":
+                            float fm;
+                            if (float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out fm))
+                            {
+                                m_fastModeScale = Mathf.Clamp(fm, 1f, 10f);
+                            }
+                            break;
+                        case "fastScouting":
+                            m_fastScouting = val == "1" || val.ToLowerInvariant() == "true";
+                            break;
                         case "holdKey":
                             m_holdKey = ParseKey(val, m_holdKey);
                             break;
@@ -2091,6 +2166,8 @@ namespace LoomTimeAccelerator
                 List<string> lines = new List<string>();
                 lines.Add("# Pillars1Toolkit settings (internal hook: LoomTimeAccelerator)");
                 lines.Add("multiplier=" + m_multiplier.ToString("0.0#", CultureInfo.InvariantCulture));
+                lines.Add("fastModeScale=" + m_fastModeScale.ToString("0.0#", CultureInfo.InvariantCulture));
+                lines.Add("fastScouting=" + (m_fastScouting ? "1" : "0"));
                 lines.Add("holdKey=" + m_holdKey);
                 lines.Add("toggleKey=" + m_toggleKey);
                 lines.Add("menuKey=" + m_menuKey);
