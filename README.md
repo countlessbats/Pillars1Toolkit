@@ -15,7 +15,7 @@ tool, no CheatEngine, no separate launcher.
 ## Features
 
 - Accelerate everything by a configurable **1.25×–10×** multiplier.
-- Set the game's native **Fast mode** anywhere from its vanilla **1.8×** to **10×**.
+- Set the game's native **Fast mode** anywhere from its vanilla **1.8×** to **4×**.
 - Optional **Fast Scouting** keeps full running speed while scouting.
 - Works **in combat** (unlike the built-in Fast speed).
 - Two independent keys: **hold-to-accelerate** and **toggle-acceleration** (+ a Clear button).
@@ -81,7 +81,7 @@ patcher.
 
 - Press your **Toggle** key (default `\`) to switch acceleration on/off, or hold your **Hold** key
   (default unbound) for momentary fast-forward. A `>> Time xN` badge shows when it's active.
-- Press **`F10`** to open the menu: drag the speed slider or use the `2×`/`3×`/`5×` presets, and click a
+- Press **`F10`** to open the menu: adjust the built-in Fast mode speed, and click a
   keybind row to rebind it (`Esc` cancels a rebind). **Clear both accelerate keys** unbinds them.
 - Enable **extra-close camera zoom** and set the closest zoom value. Lower values zoom closer; `Close`
   defaults to `0.20`, and `Extreme` goes to `0.10`.

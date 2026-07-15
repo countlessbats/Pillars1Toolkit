@@ -257,10 +257,16 @@ namespace LoomTimeAccelerator
             SetLabel(valueLabel, "x" + initial.ToString("0.##"));
             if (group.Slider.Track != null)
             {
-                Vector3 worldRight = group.Slider.Track.transform.TransformPoint(new Vector3(0.5f, 0f, 0f));
+                float right = group.Slider.PuckMax;
+                if (Mathf.Abs(right) < 0.001f)
+                {
+                    right = group.Slider.Track.transform.localPosition.x
+                        + group.Slider.Track.transform.localScale.x;
+                }
+                Vector3 worldRight = group.Slider.transform.TransformPoint(new Vector3(right, 0f, 0f));
                 Vector3 rightInPage = m_page.transform.InverseTransformPoint(worldRight);
                 valueLabel.transform.localPosition = new Vector3(
-                    rightInPage.x + 24f, rightInPage.y, rightInPage.z);
+                    rightInPage.x + 18f, rightInPage.y, rightInPage.z);
             }
             group.Setting = initial;
             UIOptionsSlider.OnSettingChanged applySliderSetting = delegate(UIOptionsSlider sender, int setting)
@@ -594,25 +600,8 @@ namespace LoomTimeAccelerator
                 {
                     NativeOptionsPage page = new NativeOptionsPage(
                         options, "Pillars1ToolkitPage", "Pillars1Toolkit");
-                    s_multiplierSlider = page.AddSlider("ToolkitTimeScale", "Speed multiplier", MinMult, MaxMult, 0.25f,
-                        owner.m_multiplier, delegate(float value)
-                        {
-                            if (s_syncingSlider)
-                            {
-                                return; // programmatic sync, not a user change
-                            }
-                            float rounded = RoundMult(value);
-                            if (Mathf.Abs(rounded - owner.m_multiplier) > 0.001f)
-                            {
-                                Debug.Log("[Pillars1Toolkit] multiplier " + owner.m_multiplier
-                                    + " -> " + rounded + " (user slider)");
-                                owner.m_multiplier = rounded;
-                                owner.SaveConfig();
-                            }
-                        });
-                    s_multiplierValueLabel = page.SliderValueLabel;
                     s_fastModeSlider = page.AddSlider("ToolkitFastMode", "Built-in Fast mode speed",
-                        1f, 10f, 0.1f, owner.m_fastModeScale, delegate(float value)
+                        MinFastModeScale, MaxFastModeScale, 0.1f, owner.m_fastModeScale, delegate(float value)
                         {
                             if (s_syncingSlider) { return; }
                             float rounded = Mathf.Round(value * 10f) / 10f;

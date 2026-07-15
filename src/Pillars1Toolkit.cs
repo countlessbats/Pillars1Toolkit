@@ -12,8 +12,8 @@ using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
 
-[assembly: AssemblyVersion("1.2.1.0")]
-[assembly: AssemblyFileVersion("1.2.1.0")]
+[assembly: AssemblyVersion("1.2.2.0")]
+[assembly: AssemblyFileVersion("1.2.2.0")]
 
 namespace LoomTimeAccelerator
 {
@@ -59,6 +59,8 @@ namespace LoomTimeAccelerator
 
         private const float MinMult = 1.25f;
         private const float MaxMult = 10f;
+        private const float MinFastModeScale = 1.8f;
+        private const float MaxFastModeScale = 4f;
         private const float VanillaMinZoom = 0.75f;
         private const float ToolkitMinZoomFloor = 0.10f;
         private const int DefaultAttributePoints = 15;
@@ -1188,22 +1190,13 @@ namespace LoomTimeAccelerator
             DrawKeyRow("Open this menu:", Capturing.Menu, m_menuKey);
 
             GUILayout.Space(10f);
-            GUILayout.Label("Speed multiplier:  x" + m_multiplier.ToString("0.0#", CultureInfo.InvariantCulture));
-
-            float slider = GUILayout.HorizontalSlider(m_multiplier, MinMult, MaxMult);
-            if (Mathf.Abs(slider - m_multiplier) > 0.001f)
-            {
-                m_multiplier = RoundMult(slider);
-            }
-
             GUILayout.BeginHorizontal();
-            if (GUILayout.Button("2x")) { m_multiplier = 2f; }
-            if (GUILayout.Button("3x")) { m_multiplier = 3f; }
-            if (GUILayout.Button("5x")) { m_multiplier = 5f; }
+            GUILayout.Label("Built-in Fast mode speed", GUILayout.Width(175f));
+            float fastSlider = GUILayout.HorizontalSlider(m_fastModeScale,
+                MinFastModeScale, MaxFastModeScale, GUILayout.Width(105f));
+            GUILayout.Label("x" + m_fastModeScale.ToString("0.0#", CultureInfo.InvariantCulture),
+                GUILayout.Width(42f));
             GUILayout.EndHorizontal();
-
-            GUILayout.Label("Built-in Fast mode:  x" + m_fastModeScale.ToString("0.0#", CultureInfo.InvariantCulture));
-            float fastSlider = GUILayout.HorizontalSlider(m_fastModeScale, 1f, 10f);
             if (Mathf.Abs(fastSlider - m_fastModeScale) > 0.001f)
             {
                 m_fastModeScale = Mathf.Round(fastSlider * 10f) / 10f;
@@ -2081,7 +2074,7 @@ namespace LoomTimeAccelerator
                             float fm;
                             if (float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out fm))
                             {
-                                m_fastModeScale = Mathf.Clamp(fm, 1f, 10f);
+                                m_fastModeScale = Mathf.Clamp(fm, MinFastModeScale, MaxFastModeScale);
                             }
                             break;
                         case "fastScouting":
