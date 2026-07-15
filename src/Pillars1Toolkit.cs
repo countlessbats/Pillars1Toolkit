@@ -9,6 +9,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Reflection;
+using HarmonyLib;
 using UnityEngine;
 
 namespace LoomTimeAccelerator
@@ -49,7 +50,7 @@ namespace LoomTimeAccelerator
     // runtime-added component. LateUpdate still runs after every Update (incl. TimeController's), so the
     // time-acceleration multiplier is unaffected.
     [DefaultExecutionOrder(-30000)]
-    public class Accelerator : MonoBehaviour
+    public partial class Accelerator : MonoBehaviour
     {
         private enum Capturing { None, Hold, Toggle, Menu }
 
@@ -59,7 +60,6 @@ namespace LoomTimeAccelerator
         private const float ToolkitMinZoomFloor = 0.10f;
         private const int DefaultAttributePoints = 15;
         private const int DefaultStatMaximum = 18;
-        private const string EyelessFinaleConversation = "data/conversations/px2_04_eyeless_stronghold/px2_04_cv_abydon_finale.conversation";
 
         private float m_multiplier = 3f;
         private bool m_closeZoomEnabled = true;
@@ -72,6 +72,11 @@ namespace LoomTimeAccelerator
         private string m_chargenStatMaximumText = DefaultStatMaximum.ToString(CultureInfo.InvariantCulture);
         private string m_skillBonusText = "0";
         private bool m_unclipCursor = true;
+        private bool m_invulnerable;   // cheat: party never takes damage (topped up + revived each frame)
+        private bool m_oneHitKills;    // cheat: any damaged hostile is finished via the player-damage path
+        private bool m_maxFocusStart;  // cheat: ciphers open every fight at maximum focus
+        private bool m_prevCombatForFocus; // combat-start edge for the focus fill
+        private readonly List<Health> m_ohkScratch = new List<Health>(16);
 
         // Separate bindings: hold-to-accelerate and toggle-acceleration.
         private KeyCode m_holdKey = KeyCode.None;
@@ -82,10 +87,58 @@ namespace LoomTimeAccelerator
         private bool m_enabled;   // effective this frame (toggle OR hold)
         private bool m_active;    // actually multiplying this frame
 
+        // Coop bridge: on a Loom Coop CLIENT, local Time.timeScale is host-authoritative, so
+        // multiplying it here only speeds LOCAL animation, not the real sim. Instead we forward
+        // the requested game speed to the host (LoomCoop.CoopManager.ClientRequestTimeScale),
+        // which accelerates the authoritative sim and echoes it back so our clock reconciles.
+        private static bool s_coopProbed;
+        private static float s_coopNextProbe;
+        private static PropertyInfo s_coopIsClient;
+        private static PropertyInfo s_coopActive;
+        private static MethodInfo s_coopSetSpeed;
+        private static PropertyInfo s_coopTbActive;   // host TB combat, streamed (client-side view)
+        private static PropertyInfo s_coopMyTurn;     // a client-controlled unit is taking its turn
+        private static MethodInfo s_coopEndTurn;      // request end-turn over the wire
+        private float m_lastCoopWant = 1f;   // last shared game-speed we pushed (edge detection)
+
+        private static bool CoopTbActive()
+        {
+            try
+            {
+                ResolveCoop();
+                return s_coopTbActive != null && (bool)s_coopTbActive.GetValue(null, null);
+            }
+            catch { return false; }
+        }
+
+        private static bool CoopMyTurn()
+        {
+            try
+            {
+                ResolveCoop();
+                return s_coopMyTurn != null && (bool)s_coopMyTurn.GetValue(null, null);
+            }
+            catch { return false; }
+        }
+
+        private static void CoopEndTurn()
+        {
+            try
+            {
+                ResolveCoop();
+                if (s_coopEndTurn != null) { s_coopEndTurn.Invoke(null, null); }
+            }
+            catch { }
+        }
+
         private bool m_skipIntros = true;   // auto-skip the startup logo movies
         private bool m_introHandled;        // stop looking once handled / past the intro window
+        private bool m_disableTutorials;    // drive the game's SHOW_TUTORIALS option off
+        private bool m_skipNewGameIntro = true; // skip the pan-up-adra + title cards on New Game
+        private bool m_throttleFootsteps = true; // cap footstep sounds at 1.5x vanilla cadence while accelerated
 
         private bool m_menuOpen;
+        private bool m_legacyMenu;
         private Capturing m_capturing = Capturing.None;
         private bool m_inputDisabledByUs;
         private Rect m_window = new Rect(60f, 60f, 340f, 0f);
@@ -105,22 +158,317 @@ namespace LoomTimeAccelerator
         {
             try
             {
-                m_configPath = Path.Combine(Application.persistentDataPath, "LoomTimeAccelerator.cfg");
+                // Per-install config (v: host and client installs on one machine share
+                // persistentDataPath, so a shared cfg lets either seat clobber the other's
+                // binds/multiplier). dataPath is unique per install. One-time migration:
+                // seed from the legacy shared cfg if the per-install one doesn't exist yet.
+                m_configPath = Path.Combine(Application.dataPath, "LoomTimeAccelerator.cfg");
+                if (!File.Exists(m_configPath))
+                {
+                    string legacy = Path.Combine(Application.persistentDataPath, "LoomTimeAccelerator.cfg");
+                    if (File.Exists(legacy))
+                    {
+                        File.Copy(legacy, m_configPath);
+                    }
+                }
             }
             catch
             {
                 m_configPath = "LoomTimeAccelerator.cfg";
             }
             LoadConfig();
+            s_suppressTutorials = m_disableTutorials;
+            s_skipNewGameIntro = m_skipNewGameIntro;
+            s_throttleFootsteps = m_throttleFootsteps;
+            TryPatchTutorials();
+            TryPatchNewGameIntro();
+            TryPatchFootsteps();
+            TryPatchInvulnerability();
+        }
+
+        private static bool s_invulnerabilityPatched;
+
+        private static void TryPatchInvulnerability()
+        {
+            if (s_invulnerabilityPatched) { return; }
+            try
+            {
+                Harmony harmony = new Harmony("loom.toolkit.invulnerability");
+                MethodInfo doDamage = typeof(Health).GetMethod("DoDamage",
+                    new Type[] { typeof(DamageInfo), typeof(GameObject) });
+                MethodInfo direct = typeof(Health).GetMethod("ApplyDamageDirectly",
+                    new Type[] { typeof(float), typeof(DamagePacket.DamageType), typeof(GameObject),
+                        typeof(StatusEffect), typeof(bool) });
+                HarmonyMethod prefix = new HarmonyMethod(
+                    typeof(Accelerator).GetMethod(nameof(InvulnerabilityDamagePrefix)));
+                HarmonyMethod postfix = new HarmonyMethod(
+                    typeof(Accelerator).GetMethod(nameof(InvulnerabilityDamagePostfix)));
+                if (doDamage != null) { harmony.Patch(doDamage, prefix: prefix, postfix: postfix); }
+                if (direct != null) { harmony.Patch(direct, prefix: prefix, postfix: postfix); }
+                // CC immunity (v1.4): invulnerability also blocks HOSTILE status effects on
+                // party members — knockdown, paralysis, charm, DoTs — which would otherwise
+                // interrupt/wedge spellcasting even with damage nulled. Beneficial effects pass.
+                // CharacterStats.CanApplyStatusEffect is the shared gate both Apply paths call.
+                MethodInfo canApply = typeof(CharacterStats).GetMethod("CanApplyStatusEffect",
+                    new Type[] { typeof(StatusEffect) });
+                if (canApply != null)
+                {
+                    harmony.Patch(canApply, postfix: new HarmonyMethod(
+                        typeof(Accelerator).GetMethod(nameof(InvulnerabilityStatusPostfix))));
+                }
+                s_invulnerabilityPatched = doDamage != null && direct != null;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[LoomTimeAccelerator] invulnerability Harmony patch failed: " + ex);
+            }
+        }
+
+        public static void InvulnerabilityDamagePrefix(Health __instance, out bool __state)
+        {
+            __state = false;
+            try
+            {
+                if (!s_invulnerabilityActive || __instance == null) { return; }
+                PartyMemberAI pm = __instance.GetComponent<PartyMemberAI>();
+                if (pm == null || !PartyMemberAI.IsInPartyList(pm)) { return; }
+                __state = __instance.TakesDamage;
+                __instance.TakesDamage = false;
+            }
+            catch { __state = false; }
+        }
+
+        public static void InvulnerabilityDamagePostfix(Health __instance, bool __state)
+        {
+            if (__state && __instance != null) { __instance.TakesDamage = true; }
+        }
+
+        // While invulnerable: party members refuse HOSTILE status effects entirely (knockdown,
+        // paralysis, stun, charm, DoTs). Beneficial effects (buffs, heals) apply normally.
+        public static void InvulnerabilityStatusPostfix(CharacterStats __instance,
+            StatusEffect effect, ref bool __result)
+        {
+            try
+            {
+                if (!s_invulnerabilityActive || !__result || __instance == null
+                    || effect == null || effect.Params == null || !effect.Params.IsHostile)
+                {
+                    return;
+                }
+                PartyMemberAI pm = __instance.GetComponent<PartyMemberAI>();
+                if (pm != null && PartyMemberAI.IsInPartyList(pm))
+                {
+                    __result = false;
+                }
+            }
+            catch { }
+        }
+
+        // Hard stop for tutorials: a Harmony prefix on TutorialManager.TriggerTutorial (the single
+        // chokepoint every tutorial routes through). When suppression is on it skips the original
+        // entirely, so even the ShowEvenIfDisabled tutorials that survive the SHOW_TUTORIALS option
+        // never appear. Isolated in try/catch so a missing/broken 0Harmony just degrades to the
+        // option-only behavior instead of breaking the mod.
+        private static bool s_suppressTutorials;
+        private static bool s_tutorialsPatched;
+
+        private static void TryPatchTutorials()
+        {
+            if (s_tutorialsPatched)
+            {
+                return;
+            }
+            try
+            {
+                MethodInfo target = typeof(TutorialManager).GetMethod("TriggerTutorial", new Type[] { typeof(int) });
+                if (target == null)
+                {
+                    return;
+                }
+                Harmony harmony = new Harmony("loom.toolkit.tutorials");
+                harmony.Patch(target, prefix: new HarmonyMethod(
+                    typeof(Accelerator).GetMethod(nameof(TriggerTutorialPrefix))));
+                s_tutorialsPatched = true;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[LoomTimeAccelerator] tutorial Harmony patch failed (option-only fallback): " + ex);
+            }
+        }
+
+        // Prefix on TutorialManager.TriggerTutorial(int): when suppressing, skip the original and
+        // report "not shown".
+        public static bool TriggerTutorialPrefix(ref bool __result)
+        {
+            if (s_suppressTutorials)
+            {
+                __result = false;
+                return false;
+            }
+            return true;
+        }
+
+        // Skip the New Game intro cutscene (pan up the adra cliff + "Obsidian Presents" + title cards).
+        // FrontEndTitleIntroductionManager runs a state machine on New Game that ends by loading the
+        // first area (which then opens character creation). The game already exposes SkipIntroToEnd()
+        // (the Escape-key skip); we invoke it the instant the intro starts, so it works even when input
+        // is gated during that phase. This just fast-forwards the game's own sanctioned skip path
+        // (fade -> load) - no engine internals touched.
+        private static bool s_skipNewGameIntro;
+        private static bool s_introPatched;
+
+        private static void TryPatchNewGameIntro()
+        {
+            if (s_introPatched)
+            {
+                return;
+            }
+            try
+            {
+                MethodInfo target = typeof(FrontEndTitleIntroductionManager).GetMethod(
+                    "StartFrontEndIntroduction", new Type[0]);
+                if (target == null)
+                {
+                    return;
+                }
+                Harmony harmony = new Harmony("loom.toolkit.newgameintro");
+                harmony.Patch(target, postfix: new HarmonyMethod(
+                    typeof(Accelerator).GetMethod(nameof(StartFrontEndIntroPostfix))));
+                s_introPatched = true;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[LoomTimeAccelerator] new-game intro Harmony patch failed: " + ex);
+            }
+        }
+
+        // Postfix on FrontEndTitleIntroductionManager.StartFrontEndIntroduction(): when enabled, jump
+        // straight to the intro's end so the pan/title never play.
+        public static void StartFrontEndIntroPostfix(FrontEndTitleIntroductionManager __instance)
+        {
+            if (s_skipNewGameIntro && __instance != null)
+            {
+                __instance.SkipIntroToEnd();
+            }
+        }
+
+        // FOOTSTEP THROTTLE: footsteps are animation events (AnimationController.OnEventFootstep ->
+        // AudioFootsteps.anim_OnEventFootstep), so accelerated time fires them proportionally more
+        // often per real second — x5 speed means five times the step-step-step. A Harmony prefix on
+        // the event handler thins the events so at most MaxFootstepRate x the vanilla cadence is
+        // actually played. The frame's true speed-up is Time.deltaTime / Time.unscaledDeltaTime
+        // (deltaTime is what drove the animation, so this stays correct no matter who scaled time —
+        // our multiplier, vanilla Fast mode, or both). A per-creature fractional accumulator picks
+        // which events play, so the survivors stay evenly spaced instead of clustering. The armor
+        // jostle event rides the same step cadence and is throttled identically (its own channel,
+        // so a played step keeps its own rhythm). At speeds <= MaxFootstepRate every event passes.
+        private const float MaxFootstepRate = 1.5f;
+        private static bool s_throttleFootsteps = true;
+        private static bool s_footstepsPatched;
+        private static readonly Dictionary<int, float> s_stepAccumulators = new Dictionary<int, float>();
+
+        private static void TryPatchFootsteps()
+        {
+            if (s_footstepsPatched)
+            {
+                return;
+            }
+            try
+            {
+                MethodInfo step = typeof(AudioFootsteps).GetMethod(
+                    "anim_OnEventFootstep", BindingFlags.NonPublic | BindingFlags.Instance);
+                MethodInfo jostle = typeof(AudioFootsteps).GetMethod(
+                    "anim_OnEventJostle", BindingFlags.NonPublic | BindingFlags.Instance);
+                if (step == null)
+                {
+                    Debug.LogError("[LoomTimeAccelerator] AudioFootsteps.anim_OnEventFootstep not found; footstep throttle disabled");
+                    return;
+                }
+                Harmony harmony = new Harmony("loom.toolkit.footsteps");
+                harmony.Patch(step, prefix: new HarmonyMethod(
+                    typeof(Accelerator).GetMethod(nameof(FootstepEventPrefix))));
+                if (jostle != null)
+                {
+                    harmony.Patch(jostle, prefix: new HarmonyMethod(
+                        typeof(Accelerator).GetMethod(nameof(JostleEventPrefix))));
+                }
+                s_footstepsPatched = true;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[LoomTimeAccelerator] footstep Harmony patch failed: " + ex);
+            }
+        }
+
+        public static bool FootstepEventPrefix(AudioFootsteps __instance)
+        {
+            return AllowStepSound(__instance, 0);
+        }
+
+        public static bool JostleEventPrefix(AudioFootsteps __instance)
+        {
+            return AllowStepSound(__instance, 1);
+        }
+
+        private static bool AllowStepSound(AudioFootsteps source, int channel)
+        {
+            if (!s_throttleFootsteps || source == null)
+            {
+                return true;
+            }
+            float unscaled = Time.unscaledDeltaTime;
+            if (unscaled <= 0f)
+            {
+                return true;
+            }
+            float speed = Time.deltaTime / unscaled;
+            if (speed <= MaxFootstepRate)
+            {
+                return true;
+            }
+            float share = MaxFootstepRate / speed; // fraction of events that equals 1.5x vanilla cadence
+            int key = (source.GetInstanceID() << 1) | channel;
+            float acc;
+            s_stepAccumulators.TryGetValue(key, out acc);
+            acc += share;
+            if (acc >= 1f)
+            {
+                s_stepAccumulators[key] = Mathf.Min(acc - 1f, 1f);
+                return true;
+            }
+            s_stepAccumulators[key] = acc;
+            return false;
         }
 
         private void Update()
         {
+            // Only the authoritative simulation may apply cheats. Healing a coop client's
+            // mirror fought the next host snapshot forever, producing endless green numbers.
+            s_invulnerabilityActive = m_invulnerable && !CoopClientActive();
+            NativeToolkitMenu.Tick(this);
+
+            if (!m_legacyMenu && NativeToolkitMenu.HandleCaptureInput(this))
+            {
+                return;
+            }
+            if (!m_legacyMenu && NativeToolkitMenu.HandleMenuHotkey(this))
+            {
+                return;
+            }
+
+            // Accumulator entries are keyed by AudioFootsteps instance IDs, which die with their
+            // area — flush the map during loads so it can't grow across a long session.
+            if (GameState.IsLoading && s_stepAccumulators.Count > 0)
+            {
+                s_stepAccumulators.Clear();
+            }
+
             TrySkipIntro();
             ApplyZoomOverride();
             HandleCharacterCreation();
             ApplySkillBonusToParty();
             ApplyCursorUnclip();
+            ApplyTutorialSetting();
             HandleSpacePriorities();
             PumpPendingEndTurn();
 
@@ -135,6 +483,14 @@ namespace LoomTimeAccelerator
             if (keyInput && m_menuKey != KeyCode.None && Input.GetKeyDown(m_menuKey))
             {
                 SetMenuOpen(!m_menuOpen);
+            }
+
+            // F11: creature render-state dump to a PER-INSTALL file (host and client each
+            // write their own CreatureDump.log — a shared Player.log gets clobbered when
+            // two instances run). Hotkey rather than an F10 button: that menu is full.
+            if (keyInput && Input.GetKeyDown(KeyCode.F11))
+            {
+                DumpCreatureStates();
             }
 
             bool hold = keyInput && m_holdKey != KeyCode.None && Input.GetKey(m_holdKey);
@@ -178,18 +534,41 @@ namespace LoomTimeAccelerator
                 return;
             }
 
-            // Priority 1: unpause-first. SafePaused=false always unpauses (and never pauses). Gate on
-            // player pause only (UiPaused covers menus/inventory/dialogue, which we leave alone).
+            // Priority 1: TURN-BASED FIRST. TB's command phase holds Time.timeScale at 0, and
+            // TimeController.Paused is literally "timeScale == 0" — so the unpause-first branch
+            // below read TB as player-paused, consumed Space, pointlessly unpaused (TB re-freezes
+            // instantly), and end-turn never ran. In tactical combat Space means End Turn on our
+            // controllable unit's turn and NOTHING else; on enemy/environment turns the press is
+            // left un-consumed so the game's own binding still sees it. The unpause-first model
+            // is RTwP-only — TB owns its own timescale.
+            if (TacticalModeManager.IsInTacticalCombat())
+            {
+                TryEndTurnOnSpace();
+                return;
+            }
+
+            // Coop CLIENT during host turn-based combat: the local TacticalModeManager never
+            // runs, so the branch above can't fire. Space = End Turn for OUR active unit,
+            // routed over the coop wire. CRITICAL: consume BEFORE the unpause-first branch —
+            // the mirrored TB pause made that branch eat the press and pointlessly unpause,
+            // which is why spacebar did nothing at all on the client.
+            if (CoopClientActive() && CoopTbActive())
+            {
+                ConsumeSpace();
+                if (CoopMyTurn())
+                {
+                    CoopEndTurn();
+                }
+                return; // not our turn: swallow (a unit takes no orders off-turn)
+            }
+
+            // Priority 2: unpause-first (RTwP). SafePaused=false always unpauses (and never
+            // pauses). Gate on player pause only (UiPaused covers menus/inventory/dialogue,
+            // which we leave alone).
             if (TimeController.Instance.Paused && !TimeController.Instance.UiPaused)
             {
                 ConsumeSpace();
                 TimeController.Instance.SafePaused = false;
-                return;
-            }
-
-            // Priority 2: end our unit's turn in turn-based combat.
-            if (TryEndTurnOnSpace())
-            {
                 return;
             }
 
@@ -235,7 +614,7 @@ namespace LoomTimeAccelerator
                 }
 
                 TacticalModeManager mgr = TacticalModeManager.Instance;
-                if (mgr == null || mgr.TurnLocked)
+                if (mgr == null)
                 {
                     return false;
                 }
@@ -246,16 +625,20 @@ namespace LoomTimeAccelerator
                     return false; // enemy / environment / nobody's active turn -> Space may still pause
                 }
 
-                // It's our unit's turn: Space means End Turn and only End Turn.
+                // It's our unit's turn: Space means End Turn and ONLY End Turn — always
+                // consumed. THE OLD FLAKINESS: TurnLocked early-returned WITHOUT consuming,
+                // so a Space pressed during a brief locked window (animations, camera moves)
+                // fell through to the vanilla binding and toggled PAUSE instead ("spacebar
+                // doesn't reliably end the turn"). Locked/busy now QUEUES, like the button.
                 ConsumeSpace();
-                if (CanEndTurn(who))
+                if (!mgr.TurnLocked && CanEndTurn(who))
                 {
                     mgr.FinishTurn(who, PassTurnStyle.UI);
                     m_pendingEndTurn = null;
                 }
                 else
                 {
-                    m_pendingEndTurn = who; // mid-move / mid-action: queue and retry, like the button does
+                    m_pendingEndTurn = who; // locked / mid-action: queue and retry, like the button
                 }
                 return true;
             }
@@ -441,8 +824,37 @@ namespace LoomTimeAccelerator
             TryDialogueNumberAdvance();
             ApplyZoomOverride();
 
+            // Cheats run in LateUpdate, after this frame's combat damage has been applied:
+            // invuln restores/revives right after a hit lands; 1-hit-kill finishes any hostile
+            // that took damage this frame.
+            ApplyInvulnerability();
+            ApplyOneHitKills();
+            ApplyMaxFocusStart();
+
             // Apply after TimeController.Update() has set the frame's base timescale.
             m_active = false;
+
+            // Coop (host OR client): game speed is ONE shared, host-authoritative value. Push it
+            // EDGE-DRIVEN through CoopSetGameSpeed — NOT the local Time.timeScale multiply, and
+            // NOT a per-frame re-assert. The old client path re-asserted its scale every 0.5s,
+            // which dominated the shared clock so the host could never turn it off; and the host
+            // path multiplied the local clock without touching the shared value, so the two
+            // seats couldn't compose. Edge-driven means: on our Fast on/off (or a multiplier
+            // change) we set the shared speed ONCE; either seat can then change it, and the
+            // host's echo reconciles everyone. No re-assert => the other seat can always
+            // override.
+            if (CoopSessionActive())
+            {
+                float want = (m_enabled && !GameState.IsLoading)
+                    ? Mathf.Clamp(m_multiplier, MinMult, MaxMult) : 1f;
+                if (Mathf.Abs(want - m_lastCoopWant) > 0.01f)
+                {
+                    if (CoopSetGameSpeed(want)) { m_lastCoopWant = want; }
+                }
+                m_active = m_enabled; // HUD "Time xN" reflects intent
+                return; // never touch Time.timeScale locally in coop
+            }
+
             if (!m_enabled)
             {
                 return;
@@ -460,6 +872,226 @@ namespace LoomTimeAccelerator
             }
         }
 
+        // ---- Coop bridge (reflection into LoomCoop; absent in solo play) ----
+        // Resolve LoomCoop.CoopManager's client-check property + speed-request method. Sidecars
+        // are Cecil/LoadFrom-injected, so Type.GetType by bare name fails — scan loaded
+        // assemblies. Do NOT latch a miss permanently (LoomCoop may load after our first probe),
+        // but throttle re-probes so solo play (no LoomCoop.dll) doesn't scan every frame.
+        private static void ResolveCoop()
+        {
+            if (s_coopIsClient != null) { return; }
+            if (s_coopProbed && Time.realtimeSinceStartup < s_coopNextProbe) { return; }
+            s_coopProbed = true;
+            s_coopNextProbe = Time.realtimeSinceStartup + 2f;
+            try
+            {
+                Assembly[] asms = AppDomain.CurrentDomain.GetAssemblies();
+                for (int i = 0; i < asms.Length; i++)
+                {
+                    Type t = null;
+                    try { t = asms[i].GetType("LoomCoop.CoopManager", false); }
+                    catch { }
+                    if (t != null)
+                    {
+                        s_coopIsClient = t.GetProperty("IsClientActive",
+                            BindingFlags.Public | BindingFlags.Static);
+                        s_coopActive = t.GetProperty("CoopActive",
+                            BindingFlags.Public | BindingFlags.Static);
+                        s_coopSetSpeed = t.GetMethod("CoopSetGameSpeed",
+                            BindingFlags.Public | BindingFlags.Static, null,
+                            new Type[] { typeof(float) }, null);
+                        s_coopTbActive = t.GetProperty("CoopClientTbActive",
+                            BindingFlags.Public | BindingFlags.Static);
+                        s_coopMyTurn = t.GetProperty("CoopClientMyTurn",
+                            BindingFlags.Public | BindingFlags.Static);
+                        s_coopEndTurn = t.GetMethod("ClientRequestEndTurn",
+                            BindingFlags.Public | BindingFlags.Static, null,
+                            Type.EmptyTypes, null);
+                        if (s_coopIsClient != null) { break; }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private static bool CoopClientActive()
+        {
+            try
+            {
+                ResolveCoop();
+                return s_coopIsClient != null && (bool)s_coopIsClient.GetValue(null, null);
+            }
+            catch { return false; }
+        }
+
+        // True in ANY coop session (host OR client). Game speed is a shared, host-authoritative
+        // value there, so both seats route Fast mode through CoopSetGameSpeed instead of the
+        // local Time.timeScale multiply (which only accelerates local animation on a client and
+        // fights the shared clock on a host).
+        private static bool CoopSessionActive()
+        {
+            try
+            {
+                ResolveCoop();
+                return s_coopActive != null && (bool)s_coopActive.GetValue(null, null);
+            }
+            catch { return false; }
+        }
+
+        // Set the shared coop game speed (host applies directly + echoes; client requests and
+        // the host echo reconciles everyone). Edge-driven by the caller — never per-frame.
+        private static bool CoopSetGameSpeed(float scale)
+        {
+            try
+            {
+                ResolveCoop();
+                if (s_coopSetSpeed == null) { return false; }
+                s_coopSetSpeed.Invoke(null, new object[] { scale });
+                return true;
+            }
+            catch { return false; }
+        }
+
+        // INVULNERABILITY: keep every party member topped up and revive any that went down this
+        // frame. Uses the game's own paths - Dead=false restores endurance, and
+        // ApplyStaminaChangeDirectly(applyIfDead:true) heals stamina AND calls OnRevive() when the
+        // target is unconscious - so state stays consistent (no husks, HUD/portraits correct). A
+        // one-shot that KO's someone during Update is undone here in the same frame's LateUpdate.
+        // MAX FOCUS AT COMBAT START: on the fight's opening edge, fill every party cipher's
+        // focus pool. Runs on the HOST/solo only — in coop the sim (and the focus stream that
+        // mirrors it to the client) is host-authoritative, and a client-side write would just
+        // be overwritten by the next snapshot. The Focus setter routes through FocusTrait and
+        // no-ops for classes without one, so no class check is needed.
+        private void ApplyMaxFocusStart()
+        {
+            bool combat = false;
+            try { combat = GameState.InCombat; } catch { }
+            bool edge = combat && !m_prevCombatForFocus;
+            m_prevCombatForFocus = combat;
+            if (!edge || !m_maxFocusStart || GameState.IsLoading || CoopClientActive())
+            {
+                return;
+            }
+            try
+            {
+                PartyMemberAI[] members = PartyMemberAI.PartyMembers;
+                for (int i = 0; members != null && i < members.Length; i++)
+                {
+                    PartyMemberAI pm = members[i];
+                    if (pm == null) { continue; }
+                    CharacterStats cs = pm.GetComponent<CharacterStats>();
+                    if (cs == null) { continue; }
+                    float max = cs.MaxFocus;
+                    if (max > 0f && cs.Focus < max)
+                    {
+                        cs.Focus = max;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[LoomTimeAccelerator] max-focus-start failed: " + ex);
+            }
+        }
+
+        private static bool s_invulnerabilityActive;
+
+        private void ApplyInvulnerability()
+        {
+            if (!s_invulnerabilityActive || GameState.IsLoading)
+            {
+                return;
+            }
+            PartyMemberAI[] members = PartyMemberAI.PartyMembers;
+            if (members == null)
+            {
+                return;
+            }
+            for (int i = 0; i < members.Length; i++)
+            {
+                PartyMemberAI member = members[i];
+                if (member == null || member.Summoner != null)
+                {
+                    continue;
+                }
+                Health h = member.GetComponent<Health>();
+                if (h == null)
+                {
+                    continue;
+                }
+                try
+                {
+                    if (h.Dead) { h.Dead = false; }                       // revive; restores endurance
+                    if (h.CurrentHealth < h.MaxHealth) { h.CurrentHealth = h.MaxHealth; }
+                    if (!h.Unconscious)
+                    {
+                        h.CurrentStamina = h.MaxStamina; // silent top-up; damage prefix prevents churn
+                    }
+                    else
+                    {
+                        float deficit = h.MaxStamina - h.CurrentStamina;
+                        if (deficit > 0.01f)
+                        {
+                            h.ApplyStaminaChangeDirectly(deficit, null, true); // one-time revive
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError("[LoomTimeAccelerator] invuln failed: " + ex);
+                }
+            }
+        }
+
+        // 1-HIT KILLS: finish any HOSTILE that has actually taken damage (the hit still has to land,
+        // so untouched enemies aren't instakilled on sight). ApplyDamageDirectlyAsPlayer routes
+        // through the real death path - proper corpse, XP to the player, no targetable husk.
+        // Kills are staged into a scratch list first: killing disables the creature's Faction, which
+        // removes it from ActiveFactionComponents, so mutating that list mid-iteration is unsafe.
+        private void ApplyOneHitKills()
+        {
+            if (!m_oneHitKills || GameState.IsLoading)
+            {
+                return;
+            }
+            List<Faction> factions = Faction.ActiveFactionComponents;
+            if (factions == null)
+            {
+                return;
+            }
+            m_ohkScratch.Clear();
+            for (int i = 0; i < factions.Count; i++)
+            {
+                Faction f = factions[i];
+                if (f == null || f.gameObject == null || !f.gameObject.activeInHierarchy)
+                {
+                    continue;
+                }
+                try
+                {
+                    if (f.RelationshipToPlayer != Faction.Relationship.Hostile) { continue; } // enemies only
+                    if (f.GetComponent<PartyMemberAI>() != null) { continue; }                 // never party
+                    Health h = f.GetComponent<Health>();
+                    if (h == null || h.Dead || h.Unconscious) { continue; }
+                    if (h.CurrentStamina < h.MaxStamina - 0.01f) { m_ohkScratch.Add(h); }       // took damage
+                }
+                catch { }
+            }
+            for (int i = 0; i < m_ohkScratch.Count; i++)
+            {
+                try
+                {
+                    Health h = m_ohkScratch[i];
+                    h.ApplyDamageDirectlyAsPlayer(h.MaxHealth + h.MaxStamina + 1000f);
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError("[LoomTimeAccelerator] one-hit-kill failed: " + ex);
+                }
+            }
+            m_ohkScratch.Clear();
+        }
+
         private void OnGUI()
         {
             if (m_capturing != Capturing.None)
@@ -467,12 +1099,24 @@ namespace LoomTimeAccelerator
                 HandleCaptureEvent();
             }
 
+            // Transient hotkey confirmation (F11 dump etc.) — top center, fades on its own.
+            if (Time.realtimeSinceStartup < s_toastUntil && !string.IsNullOrEmpty(s_toast))
+            {
+                GUI.Label(new Rect(Screen.width * 0.5f - 250f, 8f, 500f, 24f),
+                    "<b>" + s_toast + "</b>");
+            }
+
+            if (!m_menuOpen)
+            {
+                DrawCheatBadge();
+            }
+
             if (m_active && !m_menuOpen)
             {
                 DrawStatusBadge();
             }
 
-            if (m_menuOpen)
+            if (m_legacyMenu && m_menuOpen)
             {
                 m_window = GUILayout.Window(0x54494D45, m_window, DrawWindow, "Pillars1Toolkit");
             }
@@ -491,6 +1135,9 @@ namespace LoomTimeAccelerator
         private void DrawWindow(int id)
         {
             GUILayout.Space(4f);
+            DrawKeyRow("Open this menu:", Capturing.Menu, m_menuKey);
+
+            GUILayout.Space(10f);
             GUILayout.Label("Speed multiplier:  x" + m_multiplier.ToString("0.0#", CultureInfo.InvariantCulture));
 
             float slider = GUILayout.HorizontalSlider(m_multiplier, MinMult, MaxMult);
@@ -505,6 +1152,24 @@ namespace LoomTimeAccelerator
             if (GUILayout.Button("5x")) { m_multiplier = 5f; }
             GUILayout.EndHorizontal();
 
+            bool throttleSteps = GUILayout.Toggle(m_throttleFootsteps, " Limit footstep sounds to 1.5x normal rate");
+            if (throttleSteps != m_throttleFootsteps)
+            {
+                m_throttleFootsteps = throttleSteps;
+                s_throttleFootsteps = throttleSteps;
+                SaveConfig();
+            }
+
+            DrawKeyRow("Hold to accelerate:", Capturing.Hold, m_holdKey);
+            DrawKeyRow("Toggle acceleration:", Capturing.Toggle, m_toggleKey);
+            if (GUILayout.Button("Clear both accelerate keys"))
+            {
+                m_holdKey = KeyCode.None;
+                m_toggleKey = KeyCode.None;
+                m_toggled = false;
+                SaveConfig();
+            }
+
             GUILayout.Space(10f);
             DrawZoomControls();
 
@@ -512,7 +1177,7 @@ namespace LoomTimeAccelerator
             DrawStatsControls();
 
             GUILayout.Space(10f);
-            DrawTestingControls();
+            DrawCheatControls();
 
             GUILayout.Space(10f);
             bool unclip = GUILayout.Toggle(m_unclipCursor, " Let mouse leave the game window");
@@ -526,19 +1191,21 @@ namespace LoomTimeAccelerator
             GUILayout.Space(10f);
             m_skipIntros = GUILayout.Toggle(m_skipIntros, " Skip intro movies at game start");
 
-            GUILayout.Space(10f);
-            DrawKeyRow("Hold to accelerate:", Capturing.Hold, m_holdKey);
-            DrawKeyRow("Toggle acceleration:", Capturing.Toggle, m_toggleKey);
-            if (GUILayout.Button("Clear both accelerate keys"))
+            bool skipAdra = GUILayout.Toggle(m_skipNewGameIntro, " Skip New Game intro (adra pan + titles)");
+            if (skipAdra != m_skipNewGameIntro)
             {
-                m_holdKey = KeyCode.None;
-                m_toggleKey = KeyCode.None;
-                m_toggled = false;
+                m_skipNewGameIntro = skipAdra;
+                s_skipNewGameIntro = skipAdra;
                 SaveConfig();
             }
 
-            GUILayout.Space(8f);
-            DrawKeyRow("Open this menu:", Capturing.Menu, m_menuKey);
+            bool noTutorials = GUILayout.Toggle(m_disableTutorials, " Disable tutorial pop-ups");
+            if (noTutorials != m_disableTutorials)
+            {
+                m_disableTutorials = noTutorials;
+                ApplyTutorialSetting(force: true);
+                SaveConfig();
+            }
 
             GUILayout.Space(10f);
             if (GUILayout.Button("Close"))
@@ -551,6 +1218,8 @@ namespace LoomTimeAccelerator
 
         private void DrawZoomControls()
         {
+            // Checkbox only: it lowers the camera's minimum-zoom floor to m_minZoom (default 0.20);
+            // the mouse wheel does the actual zooming within that range, so no slider is needed.
             bool closeZoom = GUILayout.Toggle(m_closeZoomEnabled, " Enable extra-close camera zoom");
             if (closeZoom != m_closeZoomEnabled)
             {
@@ -558,23 +1227,6 @@ namespace LoomTimeAccelerator
                 ApplyZoomOverride(force: true);
                 SaveConfig();
             }
-
-            GUI.enabled = m_closeZoomEnabled;
-            GUILayout.Label("Closest zoom:  " + m_minZoom.ToString("0.00", CultureInfo.InvariantCulture)
-                + "  (lower = closer)");
-            float zoom = GUILayout.HorizontalSlider(m_minZoom, ToolkitMinZoomFloor, VanillaMinZoom);
-            if (Mathf.Abs(zoom - m_minZoom) > 0.001f)
-            {
-                m_minZoom = Mathf.Round(zoom * 100f) / 100f;
-                ApplyZoomOverride(force: true);
-            }
-
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button("Extreme")) { m_minZoom = 0.10f; ApplyZoomOverride(force: true); SaveConfig(); }
-            if (GUILayout.Button("Close")) { m_minZoom = 0.20f; ApplyZoomOverride(force: true); SaveConfig(); }
-            if (GUILayout.Button("Vanilla")) { m_minZoom = VanillaMinZoom; ApplyZoomOverride(force: true); SaveConfig(); }
-            GUILayout.EndHorizontal();
-            GUI.enabled = true;
         }
 
         private void ApplyZoomOverride(bool force = false)
@@ -631,80 +1283,278 @@ namespace LoomTimeAccelerator
             GUILayout.EndHorizontal();
         }
 
-        private void DrawTestingControls()
+        private void DrawCheatControls()
         {
-            GUILayout.Label("Testing");
-            if (GUILayout.Button("Start Eyeless finale conversation"))
+            GUILayout.Label("Cheats");
+            bool inv = GUILayout.Toggle(m_invulnerable, " Invulnerability (party never takes damage)");
+            if (inv != m_invulnerable)
             {
-                StartEyelessFinaleConversation(0);
+                m_invulnerable = inv;
+                SaveConfig();
             }
-
-            if (GUILayout.Button("Jump to Eyeless tempering branch"))
+            bool ohk = GUILayout.Toggle(m_oneHitKills, " 1-Hit Kills (any damage kills enemies)");
+            if (ohk != m_oneHitKills)
             {
-                StartEyelessFinaleConversation(145);
+                m_oneHitKills = ohk;
+                SaveConfig();
             }
+            bool mfs = GUILayout.Toggle(m_maxFocusStart, " Ciphers start fights at max focus");
+            if (mfs != m_maxFocusStart)
+            {
+                m_maxFocusStart = mfs;
+                SaveConfig();
+            }
+            if (GUILayout.Button("Remove Fog of War (this area)"))
+            {
+                RemoveFogOfWar();
+            }
+            GUILayout.Label("<i>F11: dump creature render states to CreatureDump.log</i>");
         }
 
-        private void StartEyelessFinaleConversation(int nodeId)
+        // Transient on-screen confirmation for hotkey actions (drawn in OnGUI).
+        private static string s_toast = "";
+        private static float s_toastUntil;
+
+        private static void Toast(string msg)
+        {
+            s_toast = msg;
+            s_toastUntil = Time.realtimeSinceStartup + 4f;
+        }
+
+        // The fader's cached fog flag lives in a protected field; read it for the dump.
+        private static readonly System.Reflection.FieldInfo s_fogVisField =
+            typeof(AIPackageController).GetField("m_isFogVisible",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+
+        // DIAGNOSTIC (F11): log the exact render/visibility state of every non-party creature
+        // in the scene, so an "invisible" creature can be understood from ground truth instead
+        // of guessed at. Fields answer the specific open questions: is the game's OWN fader
+        // running (pkgOn) and what does its cached fog flag say (fogVis)? does the fog system
+        // consider the spot visible (pv)? is anything actually rendering (rend)? how far is
+        // the nearest party member (partyDist)? Written to a PER-INSTALL file —
+        // <install>\PillarsOfEternity_Data\CreatureDump.log — because host and client share
+        // one Player.log and clobber each other's dumps.
+        private static void DumpCreatureStates()
         {
             try
             {
-                if (ConversationManager.Instance == null)
+                System.Text.StringBuilder sb = new System.Text.StringBuilder();
+                sb.AppendLine("==== creature render dump " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
+                    + " scene=" + UnityEngine.SceneManagement.SceneManager.GetActiveScene().name + " ====");
+                // The unit under the mouse gets called out by name AND flagged on its line, so
+                // a specific unit can be identified unambiguously ("hover it, press F11").
+                GameObject hover = null;
+                try
                 {
-                    AddToolkitMessage("conversation manager is not ready.", Color.yellow);
-                    return;
+                    hover = GameCursor.CharacterUnderCursor;
+                    if (hover == null) { hover = GameCursor.GenericUnderCursor; }
+                    if (hover == null) { hover = GameCursor.ObjectUnderCursor; }
                 }
-
-                GameObject owner = GetConversationOwner();
-                if (owner == null)
+                catch { }
+                sb.AppendLine("  moused-over: " + (hover != null ? hover.name : "(nothing)"));
+                // Full detail on the hovered object UNCONDITIONALLY — party companions
+                // (Heodan!) are excluded from the creature loop below, so this is the only
+                // way to see their render state.
+                if (hover != null)
                 {
-                    AddToolkitMessage("no player or party member is loaded.", Color.yellow);
-                    return;
+                    sb.AppendLine("  HOVER DETAIL: " + DescribeObject(hover));
                 }
-
-                ConversationManager.Instance.KillAllBarkStrings();
-                ConversationManager.Instance.StartConversation(EyelessFinaleConversation, nodeId, owner, FlowChartPlayer.DisplayMode.Standard);
-                AddToolkitMessage("started Eyeless finale conversation at node " + nodeId.ToString(CultureInfo.InvariantCulture) + ".", Color.cyan);
+                System.Collections.Generic.List<Faction> facs = Faction.ActiveFactionComponents;
+                PartyMemberAI[] party = PartyMemberAI.PartyMembers;
+                int n = 0;
+                for (int i = 0; facs != null && i < facs.Count; i++)
+                {
+                    Faction f = facs[i];
+                    if (f == null || f.gameObject == null) { continue; }
+                    GameObject go = f.gameObject;
+                    if (go.GetComponent<PartyMemberAI>() != null) { continue; } // party excluded
+                    Health h = go.GetComponent<Health>();
+                    if (h == null) { continue; } // creatures only
+                    int rendOn = 0, rendTot = 0;
+                    try
+                    {
+                        Renderer[] rs = go.GetComponentsInChildren<Renderer>(true);
+                        rendTot = rs.Length;
+                        for (int r = 0; r < rs.Length; r++)
+                        {
+                            if (rs[r] != null && rs[r].enabled && rs[r].gameObject.activeInHierarchy) { rendOn++; }
+                        }
+                    }
+                    catch { }
+                    AlphaControl ac = go.GetComponent<AlphaControl>();
+                    Vector3 p = go.transform.position;
+                    // The game's own fader: enabled? and its cached verdict.
+                    string pkgOn = "none", fogVis = "?";
+                    try
+                    {
+                        AIPackageController pkg = go.GetComponent<AIPackageController>();
+                        if (pkg != null)
+                        {
+                            pkgOn = pkg.enabled ? "on" : "OFF";
+                            if (s_fogVisField != null) { fogVis = s_fogVisField.GetValue(pkg).ToString(); }
+                        }
+                    }
+                    catch { }
+                    bool pv = false;
+                    try { pv = FogOfWar.Instance != null && FogOfWar.Instance.PointVisible(p); } catch { }
+                    float partyDist = -1f;
+                    try
+                    {
+                        for (int m = 0; party != null && m < party.Length; m++)
+                        {
+                            if (party[m] == null || party[m].gameObject == null) { continue; }
+                            float d = Vector3.Distance(p, party[m].gameObject.transform.position);
+                            if (partyDist < 0f || d < partyDist) { partyDist = d; }
+                        }
+                    }
+                    catch { }
+                    string rel = "?";
+                    try { rel = f.RelationshipToPlayer.ToString(); } catch { }
+                    // Display name too: quest NPCs (Heodan!) live on generic GameObjects
+                    // (NPC_Caravanner_M_0X) — the go.name alone can't identify them.
+                    string dispName = "";
+                    try
+                    {
+                        CharacterStats cs = go.GetComponent<CharacterStats>();
+                        if (cs != null)
+                        {
+                            string dn = cs.Name();
+                            if (!string.IsNullOrEmpty(dn) && dn != "*NameError*") { dispName = " \"" + dn + "\""; }
+                        }
+                    }
+                    catch { }
+                    sb.AppendLine(string.Format(
+                        "  {0}{1}{2} active={3} rend={4}/{5} alphaCtrl={6} pkg={7} fogVis={8} pv={9} isFow={10} partyDist={11:0.0} dead={12} hp={13:0} rel={14} pos=({15:0},{16:0},{17:0})",
+                        (hover != null && go == hover ? ">>> MOUSED-OVER >>> " : ""),
+                        go.name, dispName, go.activeInHierarchy, rendOn, rendTot,
+                        (ac != null ? ac.Alpha.ToString("0.00") : "none"),
+                        pkgOn, fogVis, pv, SafeIsFow(f), partyDist,
+                        h.Dead, h.CurrentHealth, rel, p.x, p.y, p.z));
+                    n++;
+                }
+                sb.AppendLine("==== end dump (" + n + " creatures) ====");
+                string path = System.IO.Path.Combine(Application.dataPath, "CreatureDump.log");
+                System.IO.File.AppendAllText(path, sb.ToString());
+                Debug.Log("[LoomTimeAccelerator] creature dump: " + n + " creatures -> " + path);
+                Toast("Dumped " + n + " creatures -> CreatureDump.log");
             }
             catch (Exception ex)
             {
-                Debug.LogError("[LoomTimeAccelerator] Eyeless finale test failed: " + ex);
-                AddToolkitMessage("Eyeless finale test failed; see output_log.txt.", Color.yellow);
+                Debug.LogError("[LoomTimeAccelerator] creature dump failed: " + ex);
+                Toast("Creature dump FAILED (see Player.log)");
             }
         }
 
-        private static GameObject GetConversationOwner()
+        private static string SafeIsFow(Faction f)
         {
-            if (GameState.s_playerCharacter != null)
-            {
-                return GameState.s_playerCharacter.gameObject;
-            }
-
-            if (PartyMemberAI.PartyMembers == null)
-            {
-                return null;
-            }
-
-            for (int i = 0; i < PartyMemberAI.PartyMembers.Length; i++)
-            {
-                PartyMemberAI member = PartyMemberAI.PartyMembers[i];
-                if (member != null)
-                {
-                    return member.gameObject;
-                }
-            }
-
-            return null;
+            try { return f.isFowVisible.ToString(); } catch { return "?"; }
         }
 
-        private static void AddToolkitMessage(string message, Color color)
+        // Full render/visibility state of ANY GameObject — party members included, no filters.
+        private static string DescribeObject(GameObject go)
         {
             try
             {
-                Console.AddMessage("Pillars1Toolkit: " + message, color);
+                int rendOn = 0, rendTot = 0;
+                float matA = -1f;
+                Renderer[] rs = go.GetComponentsInChildren<Renderer>(true);
+                rendTot = rs.Length;
+                for (int r = 0; r < rs.Length; r++)
+                {
+                    if (rs[r] == null) { continue; }
+                    if (rs[r].enabled && rs[r].gameObject.activeInHierarchy) { rendOn++; }
+                    if (matA < 0f && rs[r].sharedMaterial != null && rs[r].sharedMaterial.HasProperty("_Color"))
+                    {
+                        matA = rs[r].sharedMaterial.color.a;
+                    }
+                }
+                AlphaControl ac = go.GetComponent<AlphaControl>();
+                bool isParty = go.GetComponent<PartyMemberAI>() != null;
+                string pkgOn = "none", fogVis = "?";
+                AIPackageController pkg = go.GetComponent<AIPackageController>();
+                if (pkg != null)
+                {
+                    pkgOn = pkg.enabled ? "on" : "OFF";
+                    if (s_fogVisField != null) { try { fogVis = s_fogVisField.GetValue(pkg).ToString(); } catch { } }
+                }
+                Health h = go.GetComponent<Health>();
+                Vector3 p = go.transform.position;
+                return string.Format(
+                    "party={0} active={1} activeInHier={2} rend={3}/{4} matAlpha={5:0.00} alphaCtrl={6} pkg={7} fogVis={8} scale={9:0.00} dead={10} pos=({11:0},{12:0},{13:0})",
+                    isParty, go.activeSelf, go.activeInHierarchy, rendOn, rendTot, matA,
+                    (ac != null ? ac.Alpha.ToString("0.00") : "none"), pkgOn, fogVis,
+                    go.transform.lossyScale.x, (h != null ? h.Dead.ToString() : "?"), p.x, p.y, p.z);
             }
-            catch
+            catch (Exception ex)
             {
+                return "(describe failed: " + ex.GetType().Name + ")";
+            }
+        }
+
+        // One-shot: turn off this area's fog of war entirely (QueueDisable also drops the
+        // line-of-sight hiding, so every creature on the map is visible regardless of where
+        // your party is standing). Re-entering / reloading the area restores normal fog.
+        private static void RemoveFogOfWar()
+        {
+            try
+            {
+                if (FogOfWar.Instance != null)
+                {
+                    FogOfWar.Instance.QueueDisable();
+                    Debug.Log("[LoomTimeAccelerator] fog of war disabled for this area");
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[LoomTimeAccelerator] remove fog failed: " + ex);
+            }
+        }
+
+        private void DrawCheatBadge()
+        {
+            if (!m_invulnerable && !m_oneHitKills)
+            {
+                return;
+            }
+            GUIStyle style = new GUIStyle(GUI.skin.label);
+            style.fontSize = 15;
+            style.fontStyle = FontStyle.Bold;
+            style.normal.textColor = new Color(1f, 0.55f, 0.2f);
+            string s = string.Empty;
+            if (m_invulnerable) { s += "INVULN  "; }
+            if (m_oneHitKills) { s += "1-HIT-KILL"; }
+            GUI.Label(new Rect(12f, 34f, 340f, 24f), ">> " + s.Trim(), style);
+        }
+
+        // Every tutorial funnels through TutorialManager.TriggerTutorial, which checks the game's own
+        // SHOW_TUTORIALS option, so "disable tutorials" just drives that option off - the native
+        // mechanism, no patching. While enabled we re-assert it each frame (cheap; a load or the
+        // options menu can flip it back); on un-check we restore it once. A couple of critical
+        // tutorials are flagged ShowEvenIfDisabled and will still appear.
+        private void ApplyTutorialSetting(bool force = false)
+        {
+            s_suppressTutorials = m_disableTutorials; // drives the Harmony prefix (nukes even ShowEvenIfDisabled)
+            try
+            {
+                if (GameState.Option == null)
+                {
+                    return;
+                }
+                if (m_disableTutorials)
+                {
+                    if (GameState.Option.GetOption(GameOption.BoolOption.SHOW_TUTORIALS))
+                    {
+                        GameState.Option.SetOption(GameOption.BoolOption.SHOW_TUTORIALS, false);
+                    }
+                }
+                else if (force)
+                {
+                    GameState.Option.SetOption(GameOption.BoolOption.SHOW_TUTORIALS, true);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[LoomTimeAccelerator] tutorial toggle failed: " + ex);
             }
         }
 
@@ -1037,8 +1887,15 @@ namespace LoomTimeAccelerator
 
         private void HandleCaptureEvent()
         {
+            if (!m_legacyMenu)
+            {
+                GUI.SetNextControlName("Pillars1ToolkitKeyCapture");
+                GUI.TextField(new Rect(-100f, -100f, 2f, 2f), string.Empty);
+                GUI.FocusControl("Pillars1ToolkitKeyCapture");
+            }
+
             Event e = Event.current;
-            if (e == null || e.type != EventType.KeyDown)
+            if (e == null || (e.type != EventType.KeyDown && e.type != EventType.KeyUp))
             {
                 return;
             }
@@ -1063,10 +1920,25 @@ namespace LoomTimeAccelerator
             m_capturing = Capturing.None;
             e.Use();
             SaveConfig();
+            NativeToolkitMenu.FinishCapture(this);
         }
 
         private void SetMenuOpen(bool open)
         {
+            if (!m_legacyMenu)
+            {
+                if (open)
+                {
+                    m_menuOpen = NativeToolkitMenu.Show(this);
+                }
+                else
+                {
+                    NativeToolkitMenu.Hide();
+                    m_menuOpen = false;
+                }
+                return;
+            }
+
             if (open == m_menuOpen)
             {
                 return;
@@ -1149,8 +2021,20 @@ namespace LoomTimeAccelerator
                         case "menuKey":
                             m_menuKey = ParseKey(val, m_menuKey);
                             break;
+                        case "legacyMenu":
+                            m_legacyMenu = val == "1" || val.ToLowerInvariant() == "true";
+                            break;
                         case "skipIntros":
                             m_skipIntros = val == "1" || val.ToLowerInvariant() == "true";
+                            break;
+                        case "disableTutorials":
+                            m_disableTutorials = val == "1" || val.ToLowerInvariant() == "true";
+                            break;
+                        case "skipNewGameIntro":
+                            m_skipNewGameIntro = val == "1" || val.ToLowerInvariant() == "true";
+                            break;
+                        case "throttleFootsteps":
+                            m_throttleFootsteps = val == "1" || val.ToLowerInvariant() == "true";
                             break;
                         case "closeZoomEnabled":
                             m_closeZoomEnabled = val == "1" || val.ToLowerInvariant() == "true";
@@ -1177,6 +2061,15 @@ namespace LoomTimeAccelerator
                         case "unclipCursor":
                             m_unclipCursor = val == "1" || val.ToLowerInvariant() == "true";
                             break;
+                        case "invulnerable":
+                            m_invulnerable = val == "1" || val.ToLowerInvariant() == "true";
+                            break;
+                        case "oneHitKills":
+                            m_oneHitKills = val == "1" || val.ToLowerInvariant() == "true";
+                            break;
+                        case "maxFocusStart":
+                            m_maxFocusStart = val == "1" || val.ToLowerInvariant() == "true";
+                            break;
                     }
                 }
             }
@@ -1201,13 +2094,20 @@ namespace LoomTimeAccelerator
                 lines.Add("holdKey=" + m_holdKey);
                 lines.Add("toggleKey=" + m_toggleKey);
                 lines.Add("menuKey=" + m_menuKey);
+                lines.Add("legacyMenu=" + (m_legacyMenu ? "1" : "0"));
                 lines.Add("skipIntros=" + (m_skipIntros ? "1" : "0"));
+                lines.Add("disableTutorials=" + (m_disableTutorials ? "1" : "0"));
+                lines.Add("skipNewGameIntro=" + (m_skipNewGameIntro ? "1" : "0"));
+                lines.Add("throttleFootsteps=" + (m_throttleFootsteps ? "1" : "0"));
                 lines.Add("closeZoomEnabled=" + (m_closeZoomEnabled ? "1" : "0"));
                 lines.Add("minZoom=" + m_minZoom.ToString("0.00", CultureInfo.InvariantCulture));
                 lines.Add("chargenPoints=" + m_chargenPoints.ToString(CultureInfo.InvariantCulture));
                 lines.Add("chargenStatMaximum=" + m_chargenStatMaximum.ToString(CultureInfo.InvariantCulture));
                 lines.Add("skillBonus=" + m_skillBonus.ToString(CultureInfo.InvariantCulture));
                 lines.Add("unclipCursor=" + (m_unclipCursor ? "1" : "0"));
+                lines.Add("invulnerable=" + (m_invulnerable ? "1" : "0"));
+                lines.Add("oneHitKills=" + (m_oneHitKills ? "1" : "0"));
+                lines.Add("maxFocusStart=" + (m_maxFocusStart ? "1" : "0"));
                 File.WriteAllLines(m_configPath, lines.ToArray());
             }
             catch (Exception ex)

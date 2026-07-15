@@ -53,7 +53,9 @@ if (-not $Csc -or -not (Test-Path $Csc)) {
     throw "Could not locate csc.exe. Pass it explicitly with -Csc."
 }
 
-$src    = Join-Path $PSScriptRoot 'src\Pillars1Toolkit.cs'
+$src    = Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'src') -Filter '*.cs' |
+    Sort-Object Name |
+    Select-Object -ExpandProperty FullName
 if (-not $OutputDir) { $OutputDir = $managed }
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
@@ -61,18 +63,20 @@ $outDll = Join-Path $OutputDir 'LoomTimeAccelerator.dll'
 
 $refs = @(
     'Assembly-CSharp.dll',
+    '0Harmony.dll',
     'UnityEngine.dll',
     'UnityEngine.CoreModule.dll',
     'UnityEngine.IMGUIModule.dll',
     'UnityEngine.InputLegacyModule.dll',
+    'UnityEngine.PhysicsModule.dll',
     'UnityEngine.TextRenderingModule.dll'
 ) | ForEach-Object { "/reference:$(Join-Path $managed $_)" }
 
 Write-Host "Compiler : $Csc"
-Write-Host "Source   : $src"
+Write-Host "Sources  : $($src -join ', ')"
 Write-Host "Output   : $outDll"
 
-$argList = @('/nologo', '/target:library', "/out:$outDll") + $refs + @($src)
+$argList = @('/nologo', '/target:library', "/out:$outDll") + $refs + $src
 & $Csc @argList
 if ($LASTEXITCODE -ne 0) { throw "Compilation failed ($LASTEXITCODE)." }
 
