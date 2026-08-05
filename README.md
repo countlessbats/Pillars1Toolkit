@@ -37,7 +37,7 @@ tool, no CheatEngine, no separate launcher.
 - **Advance dialogue with Space, Enter, or any number key.** At a "Continue" prompt, Space and Enter
   advance it (vanilla) and so does any number key (0–9 or numpad) — no reaching for a specific key.
 - Optional **skip intro movies** toggle, on by default.
-- Tiny footprint: one sidecar DLL called once per frame from `GameState.Update()`.
+- Standard BepInEx plugin; no game assembly or data-file edits.
 
 ---
 
@@ -45,34 +45,15 @@ tool, no CheatEngine, no separate launcher.
 
 Requires Pillars of Eternity 1 (Windows).
 
-### Option A — Quick install (no compiling) — recommended
-
-1. Download **`Pillars1Toolkit-v1.2.0.zip`** from the
-   [Releases](https://github.com/countlessbats/Pillars1Toolkit/releases) page and extract it.
-2. **Close the game.**
-3. **Double-click `install.bat`** and approve the administrator prompt.
-
-That's it — no compiler, no .NET SDK, no runtime install. `install.bat` runs the bundled
-`install.ps1`, which copies the prebuilt sidecar, backs up `Assembly-CSharp.dll` once, and injects
-the hook using the bundled (MIT-licensed) `Mono.Cecil.dll`. It auto-detects a Steam install (and
-prompts for the path if it can't find one), and is safe to re-run.
-
-```bat
-install.bat -GameDir "D:\Games\Pillars of Eternity"
-```
-
-(Prefer PowerShell directly? `powershell -ExecutionPolicy Bypass -File .\install.ps1 -GameDir "<path>"`.)
-
-4. Launch the game and press **`F10`** to open the Pillars1Toolkit menu.
+Install BepInEx 5, then place `LoomTimeAccelerator.dll` under
+`BepInEx/plugins/Pillars1Toolkit`. Launch the game and press **F10**.
 
 ### Option B — Build from source (developers)
 
-Needs the Roslyn C# compiler (`csc.exe`) and, for the hook, either `install.ps1` or the Mono.Cecil
-patcher.
+Needs the Roslyn C# compiler (`csc.exe`) and an installed BepInEx 5 development target.
 
 ```powershell
 ./build.ps1 -GameDir "E:\SteamLibrary\steamapps\common\Pillars of Eternity"
-# then run install.ps1 once to inject the GameState.Update hook
 ```
 
 ---
@@ -100,15 +81,9 @@ patcher.
 
 ---
 
-## Backups & uninstalling
+## Uninstalling
 
-`install.ps1` saves your original assembly to `Assembly-CSharp.dll.speedhack-backup` (once).
-To uninstall:
-
-1. Restore `Assembly-CSharp.dll` from `Assembly-CSharp.dll.speedhack-backup`.
-2. Delete `PillarsOfEternity_Data/Managed/LoomTimeAccelerator.dll`.
-
-Steam → Verify integrity of game files also restores the original assembly.
+Close the game and delete `BepInEx/plugins/Pillars1Toolkit`.
 
 ---
 
@@ -117,11 +92,8 @@ Steam → Verify integrity of game files also restores the original assembly.
 - Because it drives Unity's `Time.timeScale`, sped-up audio is pitched up — same as any
   fast-forward. Pause/inventory (timescale 0) are untouched.
 - Very high multipliers can make fast-paced combat hard to control; 2×–4× is a comfortable range.
-- Coexists with other `GameState.Update` sidecar mods (e.g. Reaper Stance): each injects its own
-  call, and this installer only adds its own hook once.
-- A future game patch that changes `GameState.Update` could require a reinstall.
-- **Internal name:** the sidecar/DLL/hook use the identifier `LoomTimeAccelerator` on purpose (the
-  injected call must match the DLL). The mod itself is "Pillars1Toolkit".
+- Uses BepInEx's shared runtime loader and Harmony copy.
+- **Internal name:** the plugin assembly remains `LoomTimeAccelerator.dll` for save/config continuity.
 
 ---
 

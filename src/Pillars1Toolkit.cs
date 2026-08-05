@@ -1,24 +1,32 @@
 // Pillars1Toolkit — quality-of-life tools for
 // Pillars of Eternity 1. See README.md and docs/HOW_IT_WORKS.md.
 //
-// The namespace / assembly is named "LoomTimeAccelerator" on purpose: it is the identifier
-// the installer injects into GameState.Update(), so the sidecar DLL, the namespace, and the
-// injected call must all agree. It is internal-only; the mod itself is "Pillars1Toolkit".
+// The namespace / assembly remains "LoomTimeAccelerator" for configuration and upgrade continuity.
+// The public plugin name is Pillars1Toolkit.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Reflection;
+using BepInEx;
 using HarmonyLib;
 using UnityEngine;
 
-[assembly: AssemblyVersion("1.2.3.0")]
-[assembly: AssemblyFileVersion("1.2.2.0")]
+[assembly: AssemblyVersion("1.2.4.0")]
+[assembly: AssemblyFileVersion("1.2.4.0")]
 
 namespace LoomTimeAccelerator
 {
-    // Sidecar entry point. Assembly-CSharp is patched to call Bootstrap.Tick() at the top of
-    // GameState.Update(); on first tick we spawn a persistent MonoBehaviour that does the work.
+    [BepInPlugin("loom.pillars1toolkit", "Pillars 1 Toolkit", "1.2.4")]
+    public sealed class Plugin : BaseUnityPlugin
+    {
+        private void Awake()
+        {
+            Bootstrap.Tick();
+        }
+    }
+
+    // Shared startup retained so the existing component initialization remains isolated.
     public static class Bootstrap
     {
         private static bool s_spawned;

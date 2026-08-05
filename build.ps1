@@ -1,11 +1,9 @@
 <#
 .SYNOPSIS
-    Builds the Pillars1Toolkit sidecar assembly and installs it into the game's Managed folder.
+    Builds the Pillars1Toolkit BepInEx plugin.
 
 .DESCRIPTION
-    Compiles src/Pillars1Toolkit.cs into LoomTimeAccelerator.dll and copies it to
-    <GameDir>/PillarsOfEternity_Data/Managed/. The internal DLL name is intentionally
-    LoomTimeAccelerator.dll to match the injected hook (see README).
+    Compiles the toolkit sources into build/LoomTimeAccelerator.dll.
 
 .PARAMETER GameDir
     Path to the Pillars of Eternity install directory (contains PillarsOfEternity_Data).
@@ -33,9 +31,11 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $managed = Join-Path $GameDir 'PillarsOfEternity_Data\Managed'
+$bepCore = Join-Path $GameDir 'BepInEx\core'
 if (-not (Test-Path $managed)) {
     throw "Managed folder not found: $managed  (is -GameDir correct?)"
 }
+if (-not (Test-Path $bepCore)) { throw "BepInEx core folder not found: $bepCore" }
 
 if (-not $Csc) {
     $candidates = @(
@@ -56,14 +56,13 @@ if (-not $Csc -or -not (Test-Path $Csc)) {
 $src    = Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'src') -Filter '*.cs' |
     Sort-Object Name |
     Select-Object -ExpandProperty FullName
-if (-not $OutputDir) { $OutputDir = $managed }
+if (-not $OutputDir) { $OutputDir = Join-Path $PSScriptRoot 'build' }
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
 $outDll = Join-Path $OutputDir 'LoomTimeAccelerator.dll'
 
 $refs = @(
     'Assembly-CSharp.dll',
-    '0Harmony.dll',
     'UnityEngine.dll',
     'UnityEngine.CoreModule.dll',
     'UnityEngine.IMGUIModule.dll',
@@ -71,6 +70,8 @@ $refs = @(
     'UnityEngine.PhysicsModule.dll',
     'UnityEngine.TextRenderingModule.dll'
 ) | ForEach-Object { "/reference:$(Join-Path $managed $_)" }
+$refs += "/reference:$(Join-Path $bepCore 'BepInEx.dll')"
+$refs += "/reference:$(Join-Path $bepCore '0Harmony.dll')"
 
 Write-Host "Compiler : $Csc"
 Write-Host "Sources  : $($src -join ', ')"
@@ -81,5 +82,4 @@ $argList = @('/nologo', '/target:library', "/out:$outDll") + $refs + $src
 if ($LASTEXITCODE -ne 0) { throw "Compilation failed ($LASTEXITCODE)." }
 
 Write-Host "`nBuilt LoomTimeAccelerator.dll." -ForegroundColor Green
-Write-Host "If this is a first install, run install.ps1 (or the patcher) to inject the hook." -ForegroundColor Yellow
-Write-Host "Restart the game to load the new build." -ForegroundColor Yellow
+Write-Host "Install under BepInEx\plugins\Pillars1Toolkit and restart the game." -ForegroundColor Yellow
