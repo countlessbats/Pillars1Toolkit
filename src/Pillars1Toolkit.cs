@@ -12,7 +12,7 @@ using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
 
-[assembly: AssemblyVersion("1.2.2.0")]
+[assembly: AssemblyVersion("1.2.3.0")]
 [assembly: AssemblyFileVersion("1.2.2.0")]
 
 namespace LoomTimeAccelerator
@@ -158,8 +158,6 @@ namespace LoomTimeAccelerator
         private bool m_hasOriginalCharacterCreationValues;
         private readonly Dictionary<CharacterStats, int[]> m_appliedSkillBonuses = new Dictionary<CharacterStats, int[]>();
 
-        // --- Space-behavior expansion (unpause-first / end-turn / dialogue) ---
-        private AIController m_pendingEndTurn;            // queued end-turn awaiting an interruptible moment
         private static MethodInfo s_convOnButton;         // cached UIConversationManager.OnButton(GameObject)
         private static bool s_convOnButtonResolved;
 
@@ -480,8 +478,8 @@ namespace LoomTimeAccelerator
             ApplyTutorialSetting();
             ApplyBuiltInFastModeScale();
             ApplyFastScouting();
-            HandleSpacePriorities();
-            PumpPendingEndTurn();
+            ApplyDoubleClickCenter();
+            // Space-behavior handling was split out into the standalone LoomFlexibleSpacebar mod.
 
             bool keyInput = SafeKeyInputAvailable();
 
@@ -554,77 +552,48 @@ namespace LoomTimeAccelerator
             m_fastScoutingWasEnabled = apply;
         }
 
-        // Space priority model (highest first):
-        //   0. A conversation window owns the keyboard. We never unpause or end a turn under it. (Number
-        //      keys also advancing a "Continue" is handled in LateUpdate, after the game processes the
-        //      frame's input, so we don't race it; Space/Enter advancing Continue is already vanilla.)
-        //   1. Unpause-first: if the game is PLAYER-paused (RTwP pause, not a UI/menu/inventory freeze),
-        //      Space ONLY unpauses and does nothing else. Works regardless of how Space is bound.
-        //   2. Turn-based combat, on a controllable party member's turn: Space ends that turn and nothing
-        //      else (queued until the unit is interruptible, exactly like the End Turn button). Enemy /
-        //      environment turns fall through so Space can still pause there.
-        //   3. Otherwise: leave Space to the game's own binding (default: pause).
-        private void HandleSpacePriorities()
+        // ---- Double-click recenter (Infinity Engine style; always on, no menu option) ----
+        // Vanilla HAS this feature (CameraControl.DoUpdate: GetDoublePressed(Mouse0) ->
+        // FocusOnPoint) but it's dead from script ordering: the double-press "armed" flag
+        // exists only between GameInput.Update and GameInput.LateUpdate each frame, and
+        // PE_GameRender drives CameraControl's DoUpdate before GameInput ticks — so the check
+        // never sees the armed window. Re-implement with self-contained edge detection and the
+        // same gates + focus call the vanilla block intended.
+        private float m_lastLmbUpAt = -10f;
+        private Vector3 m_lastLmbUpPos;
+
+        private void ApplyDoubleClickCenter()
         {
-            if (m_menuOpen || m_capturing != Capturing.None)
+            try
             {
-                return;
+                if (!Input.GetMouseButtonUp(0)) { return; }
+                Vector3 pos = Input.mousePosition;
+                float now = Time.unscaledTime;
+                bool isDouble = (now - m_lastLmbUpAt) <= 0.3f
+                    && (pos - m_lastLmbUpPos).magnitude <= 10f;
+                // Consume on fire: a triple-click is one recenter, not two.
+                m_lastLmbUpAt = isDouble ? -10f : now;
+                m_lastLmbUpPos = pos;
+                if (!isDouble) { return; }
+                if (UINoClick.MouseOverUI) { return; }      // click landed on UI, not the world
+                if (GameInput.DisableInput) { return; }
+                if (GameState.IsLoading || Cutscene.CutsceneActive) { return; }
+                if (ConversationActive()) { return; }
+                // Aiming a cast: rapid clicks there are targeting, not navigation.
+                GameCursor.CursorType cur = GameCursor.DesiredCursor;
+                if (cur == GameCursor.CursorType.CastAbility
+                    || cur == GameCursor.CursorType.CastAbilityFar
+                    || cur == GameCursor.CursorType.CastAbilityNoLOS) { return; }
+                CameraControl cam = CameraControl.Instance;
+                if (cam == null) { return; }
+                // Same point selection as the vanilla block: character under cursor wins,
+                // else the picked world position.
+                Vector3 point = GameInput.WorldMousePosition;
+                GameObject under = GameCursor.CharacterUnderCursor;
+                if (under != null) { point = under.transform.position; }
+                cam.FocusOnPoint(point, 0.4f);
             }
-            if (GameState.IsLoading || TimeController.Instance == null)
-            {
-                return;
-            }
-
-            // Priority 0: don't touch Space while a conversation is up.
-            if (ConversationActive())
-            {
-                return;
-            }
-
-            if (!Input.GetKeyDown(KeyCode.Space))
-            {
-                return;
-            }
-
-            // Priority 1: TURN-BASED FIRST. TB's command phase holds Time.timeScale at 0, and
-            // TimeController.Paused is literally "timeScale == 0" — so the unpause-first branch
-            // below read TB as player-paused, consumed Space, pointlessly unpaused (TB re-freezes
-            // instantly), and end-turn never ran. In tactical combat Space means End Turn on our
-            // controllable unit's turn and NOTHING else; on enemy/environment turns the press is
-            // left un-consumed so the game's own binding still sees it. The unpause-first model
-            // is RTwP-only — TB owns its own timescale.
-            if (TacticalModeManager.IsInTacticalCombat())
-            {
-                TryEndTurnOnSpace();
-                return;
-            }
-
-            // Coop CLIENT during host turn-based combat: the local TacticalModeManager never
-            // runs, so the branch above can't fire. Space = End Turn for OUR active unit,
-            // routed over the coop wire. CRITICAL: consume BEFORE the unpause-first branch —
-            // the mirrored TB pause made that branch eat the press and pointlessly unpause,
-            // which is why spacebar did nothing at all on the client.
-            if (CoopClientActive() && CoopTbActive())
-            {
-                ConsumeSpace();
-                if (CoopMyTurn())
-                {
-                    CoopEndTurn();
-                }
-                return; // not our turn: swallow (a unit takes no orders off-turn)
-            }
-
-            // Priority 2: unpause-first (RTwP). SafePaused=false always unpauses (and never
-            // pauses). Gate on player pause only (UiPaused covers menus/inventory/dialogue,
-            // which we leave alone).
-            if (TimeController.Instance.Paused && !TimeController.Instance.UiPaused)
-            {
-                ConsumeSpace();
-                TimeController.Instance.SafePaused = false;
-                return;
-            }
-
-            // Priority 3: not consumed -> the game's normal Space binding runs (default: pause toggle).
+            catch { }
         }
 
         private static bool ConversationActive()
@@ -638,136 +607,6 @@ namespace LoomTimeAccelerator
             {
                 return false;
             }
-        }
-
-        // Mark the physical Space key handled for this frame via the game's own consume mechanism, so no
-        // other Space-bound control (PAUSE, PASS_TURN, ...) can also act on this press. The flag auto-resets
-        // in GameInput.LateUpdate, so there is nothing to clean up.
-        private static void ConsumeSpace()
-        {
-            try
-            {
-                GameInput.GetKeyDown(KeyCode.Space, true);
-            }
-            catch
-            {
-            }
-        }
-
-        // True if Space was handled as an end-turn (ended now or queued). Only fires on a controllable
-        // party member's turn; enemy / environment / no-active-turn cases return false and fall through.
-        private bool TryEndTurnOnSpace()
-        {
-            try
-            {
-                if (!TacticalModeManager.IsInTacticalCombat())
-                {
-                    return false;
-                }
-
-                TacticalModeManager mgr = TacticalModeManager.Instance;
-                if (mgr == null)
-                {
-                    return false;
-                }
-
-                AIController who = mgr.WhoseTurn;
-                if (who == null || !who.IsControllablePartyMember())
-                {
-                    return false; // enemy / environment / nobody's active turn -> Space may still pause
-                }
-
-                // It's our unit's turn: Space means End Turn and ONLY End Turn — always
-                // consumed. THE OLD FLAKINESS: TurnLocked early-returned WITHOUT consuming,
-                // so a Space pressed during a brief locked window (animations, camera moves)
-                // fell through to the vanilla binding and toggled PAUSE instead ("spacebar
-                // doesn't reliably end the turn"). Locked/busy now QUEUES, like the button.
-                ConsumeSpace();
-                if (!mgr.TurnLocked && CanEndTurn(who))
-                {
-                    mgr.FinishTurn(who, PassTurnStyle.UI);
-                    m_pendingEndTurn = null;
-                }
-                else
-                {
-                    m_pendingEndTurn = who; // locked / mid-action: queue and retry, like the button
-                }
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError("[LoomTimeAccelerator] end-turn failed: " + ex);
-                return false;
-            }
-        }
-
-        // Drives a queued end-turn until the unit becomes interruptible or the turn moves on.
-        private void PumpPendingEndTurn()
-        {
-            if (m_pendingEndTurn == null)
-            {
-                return;
-            }
-
-            try
-            {
-                TacticalModeManager mgr = TacticalModeManager.Instance;
-                if (mgr == null || !TacticalModeManager.IsInTacticalCombat()
-                    || mgr.WhoseTurn != m_pendingEndTurn || !m_pendingEndTurn.IsControllablePartyMember())
-                {
-                    m_pendingEndTurn = null; // situation changed; abandon the queued end-turn
-                    return;
-                }
-
-                if (!mgr.TurnLocked && CanEndTurn(m_pendingEndTurn))
-                {
-                    mgr.FinishTurn(m_pendingEndTurn, PassTurnStyle.UI);
-                    m_pendingEndTurn = null;
-                }
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError("[LoomTimeAccelerator] pending end-turn failed: " + ex);
-                m_pendingEndTurn = null;
-            }
-        }
-
-        // Mirrors UIPassTurnButton.CanEndTurn: a turn can't be ended while the unit is actively moving or
-        // in a non-Wait action (unless it's a long cast). State types are matched by name so the sidecar
-        // needs no reference to the game's AI.Player namespace.
-        private static bool CanEndTurn(AIController actor)
-        {
-            if (actor == null)
-            {
-                return true;
-            }
-            if (!actor.IsControllablePartyMember())
-            {
-                return false;
-            }
-
-            TacticalModeManager mgr = TacticalModeManager.Instance;
-            if (mgr != null && mgr.HasLongCastEvent(actor))
-            {
-                return true;
-            }
-
-            var state = actor.StateManager.CurrentState;
-            if (state == null)
-            {
-                return true;
-            }
-
-            string name = state.GetType().Name;
-            if (name == "Move" || name == "PathToPosition")
-            {
-                return !state.IsMoving();
-            }
-            if (name == "Wait")
-            {
-                return true;
-            }
-            return false;
         }
 
         // LateUpdate helper: while a conversation shows a "Continue", let any number key (0-9 or numpad)
